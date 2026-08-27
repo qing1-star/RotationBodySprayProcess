@@ -227,6 +227,11 @@ namespace smrobot::workbench::spray::rotationbody
             0.0, 10000.0, 6, QStringLiteral(" s"), m_groupGroup);
         transitionRow->addWidget(m_transitionSpin, 1);
         groupLayout->addLayout(transitionRow);
+        m_exportGroupButton = new QPushButton(m_groupGroup);
+        m_exportGroupButton->setObjectName(
+            QStringLiteral("rotationBodyTrajectory.exportGroup"));
+        robot_qt_viewer::configureInspectorButton(m_exportGroupButton);
+        groupLayout->addWidget(m_exportGroupButton);
         layout->addWidget(m_groupGroup);
         layout->addStretch(1);
 
@@ -259,6 +264,8 @@ namespace smrobot::workbench::spray::rotationbody
             this, &TrajectoryPlanningPanel::beginNewTrajectoryRequested);
         connect(m_saveToGroupButton, &QPushButton::clicked,
             this, &TrajectoryPlanningPanel::saveCurrentTrajectoryRequested);
+        connect(m_exportGroupButton, &QPushButton::clicked,
+            this, &TrajectoryPlanningPanel::exportTrajectoryGroupRequested);
         connect(m_editButton, &QPushButton::clicked, this, [this]() {
             const std::string id = selectedPassId();
             if(!id.empty()) emit loadTrajectoryRequested(id);
@@ -462,6 +469,9 @@ namespace smrobot::workbench::spray::rotationbody
         m_applyTransformButton->setEnabled(
             m_viewModel.canEditCurrentTrajectory && selectedPoints >= 1);
         m_saveToGroupButton->setEnabled(m_viewModel.canSaveCurrentTrajectory);
+        m_exportGroupButton->setEnabled(
+            m_viewModel.canEditTrajectoryGroup &&
+            !m_viewModel.trajectoryWorkspace.group.passes.empty());
         m_editButton->setEnabled(m_viewModel.canEditTrajectoryGroup && passSelected);
         m_removeButton->setEnabled(m_viewModel.canEditTrajectoryGroup && passSelected);
         m_transitionSpin->setEnabled(m_viewModel.canEditTrajectoryGroup && passSelected);
@@ -503,6 +513,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_editButton->setText(tr("trajectory.edit"));
         m_removeButton->setText(tr("trajectory.remove"));
         m_saveToGroupButton->setText(tr("trajectory.save_to_group"));
+        m_exportGroupButton->setText(tr("trajectory.export_group"));
         m_transitionLabel->setText(tr("trajectory.transition_after"));
     }
 }

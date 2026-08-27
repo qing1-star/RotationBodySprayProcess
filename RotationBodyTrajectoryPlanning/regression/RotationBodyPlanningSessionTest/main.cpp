@@ -13,7 +13,6 @@
 #include "Widgets/RotationBodyWorkflowNavigation.h"
 #include "Widgets/SectionRegionPanel.h"
 #include "Widgets/SectionView.h"
-#include "Widgets/WorkpieceCalibrationPanel.h"
 
 #include <AssetCore/ModelDesc.h>
 #include <SimulationProject/ProjectDocument.h>
@@ -2067,8 +2066,8 @@ namespace
         app::RotationBodyPlanningLeftPanel leftPanel;
         app::RotationBodyPlanningRightPanel rightPanel;
         expect(leftPanel.findChildren<QScrollArea*>().size() == 2 &&
-            rightPanel.findChildren<QScrollArea*>().size() == 3,
-            "each module workflow page owns an independent content scroll area");
+            rightPanel.findChildren<QScrollArea*>().size() == 1,
+            "trajectory planning keeps its own content scroll area");
         leftPanel.setLanguageCode(QStringLiteral("zh-CN"));
         rightPanel.setLanguageCode(QStringLiteral("zh-CN"));
         auto* saveButton = leftPanel.findChild<QPushButton*>(
@@ -2093,10 +2092,8 @@ namespace
             leftPanel.sectionRegionPanel() != nullptr &&
             rightPanel.hasVisibleContent() &&
             rightPanel.trajectoryPlanningPanel() != nullptr &&
-            rightPanel.abbTranslationPanel() != nullptr &&
-            rightPanel.workpieceCalibrationPanel() != nullptr &&
             rightPanel.sectionRegionPanel() == nullptr,
-            "left stack owns model and section pages while the right stack owns trajectory, ABB, and calibration pages");
+            "left stack owns model and section pages while the right stack owns trajectory planning");
         expect(returnButton != nullptr &&
             returnButton->text() == app::RotationBodyPlanningTranslations::text(
                 QStringLiteral("en"), "command.return_to_workpiece") &&
@@ -2144,27 +2141,19 @@ namespace
             "region planning exposes exactly five selectable labels");
     }
 
+    #if 0 // Calibration UI moved to SMRobotWorkbenchCalibrationTranslation.
     void testWorkpieceCalibrationWidget()
     {
-        app::RotationBodyPlanningRightPanel rightPanel;
-        rightPanel.setViewModel(uiViewModel(domain::PlanningStage::ModelLoaded));
-        rightPanel.setCurrentRightWorkflow(
-            app::RotationBodyRightWorkflow::WorkpieceCalibration);
-        auto* stack = rightPanel.findChild<QStackedWidget*>(
-            QStringLiteral("rotationBodyRightWorkflowStack"));
-        app::WorkpieceCalibrationPanel* panel =
-            rightPanel.workpieceCalibrationPanel();
-        expect(panel != nullptr && stack != nullptr && stack->count() == 3 &&
-            rightPanel.currentRightWorkflow() ==
-                app::RotationBodyRightWorkflow::WorkpieceCalibration,
-            "right workflow exposes calibration as the page after ABB translation");
-        if(panel == nullptr) return;
+        app::WorkpieceCalibrationPanel panel;
+        panel.setViewModel(uiViewModel(domain::PlanningStage::ModelLoaded));
+        expect(panel.findChild<QTabWidget*>(QStringLiteral("rotationBodyCalibration.modes")) != nullptr,
+            "calibration module exposes cylinder and circle calibration modes");
 
-        auto* tabs = panel->findChild<QTabWidget*>(
+        auto* tabs = panel.findChild<QTabWidget*>(
             QStringLiteral("rotationBodyCalibration.modes"));
-        auto* cylinderTable = panel->findChild<QTableWidget*>(
+        auto* cylinderTable = panel.findChild<QTableWidget*>(
             QStringLiteral("rotationBodyCalibration.cylinderPoints"));
-        auto* circleTable = panel->findChild<QTableWidget*>(
+        auto* circleTable = panel.findChild<QTableWidget*>(
             QStringLiteral("rotationBodyCalibration.circlePoints"));
         expect(tabs != nullptr && cylinderTable != nullptr && circleTable != nullptr &&
             cylinderTable->rowCount() == 12 && circleTable->rowCount() == 6,
@@ -2191,16 +2180,16 @@ namespace
                     QString::number(point[static_cast<std::size_t>(column)], 'f', 3));
             }
         }
-        auto* fitButton = panel->findChild<QPushButton*>(
+        auto* fitButton = panel.findChild<QPushButton*>(
             QStringLiteral("rotationBodyCalibration.fitCurrent"));
         expect(fitButton != nullptr, "calibration exposes a current-mode fit command");
         if(fitButton == nullptr) return;
         fitButton->click();
-        expect(panel->circleFit().has_value() &&
-            std::abs(panel->circleFit()->radiusMeters - 0.1) < 1.0e-6,
+        expect(panel.circleFit().has_value() &&
+            std::abs(panel.circleFit()->radiusMeters - 0.1) < 1.0e-6,
             "calibration page converts millimeter entries and fits the six-point circle");
 
-        const auto setCoordinate = [panel](
+        const auto setCoordinate = [&panel](
             const QString& prefix,
             const std::array<double, 3>& point) {
             const std::array<QString, 3> axes{
@@ -2210,7 +2199,7 @@ namespace
             };
             for(int index = 0; index < 3; ++index)
             {
-                if(QLineEdit* field = panel->findChild<QLineEdit*>(
+                if(QLineEdit* field = panel.findChild<QLineEdit*>(
                     QStringLiteral("rotationBodyCalibration.%1.%2")
                         .arg(prefix, axes[static_cast<std::size_t>(index)]))) {
                     field->setText(QString::number(
@@ -2221,20 +2210,20 @@ namespace
         setCoordinate(QStringLiteral("top"), { 600.0, -200.0, 1300.0 });
         setCoordinate(QStringLiteral("yStart"), { 500.0, -200.0, 1100.0 });
         setCoordinate(QStringLiteral("yEnd"), { 500.0, 0.0, 1100.0 });
-        auto* height = panel->findChild<QDoubleSpinBox*>(
+        auto* height = panel.findChild<QDoubleSpinBox*>(
             QStringLiteral("rotationBodyCalibration.height"));
         if(height != nullptr) height->setValue(200.0);
 
         int emissionCount = 0;
         domain::TransformComponents emitted;
         QObject::connect(
-            &rightPanel,
-            &app::RotationBodyPlanningRightPanel::calibrationBaseTransformCalculated,
+            &panel,
+            &app::WorkpieceCalibrationPanel::baseTransformCalculated,
             [&emissionCount, &emitted](const domain::TransformComponents& components) {
                 ++emissionCount;
                 emitted = components;
             });
-        auto* calculateButton = panel->findChild<QPushButton*>(
+        auto* calculateButton = panel.findChild<QPushButton*>(
             QStringLiteral("rotationBodyCalibration.calculateApply"));
         expect(calculateButton != nullptr && calculateButton->isEnabled(),
             "a valid fit enables calculation and application of the workpiece pose");
@@ -2244,19 +2233,20 @@ namespace
             emitted.rollPitchYawRadians.isZero(1.0e-9),
             "calibration forwards X/Y/Z/Rx/Ry/Rz through the right-panel base-pose signal");
 
-        auto* poseResult = panel->findChild<QLabel*>(
+        auto* poseResult = panel.findChild<QLabel*>(
             QStringLiteral("rotationBodyCalibration.poseResult"));
         const QString englishPose = poseResult != nullptr
             ? poseResult->text()
             : QString();
-        rightPanel.setLanguageCode(QStringLiteral("zh_CN"));
+        panel.setLanguageCode(QStringLiteral("zh_CN"));
         expect(poseResult != nullptr && !englishPose.isEmpty() &&
-            poseResult->text() != englishPose && panel->frameResult().has_value(),
+            poseResult->text() != englishPose && panel.frameResult().has_value(),
             "calculated calibration result retranslates without losing its pose");
-        rightPanel.setLanguageCode(QStringLiteral("en"));
+        panel.setLanguageCode(QStringLiteral("en"));
         expect(poseResult != nullptr && poseResult->text() == englishPose,
             "calibration pose result returns to English after live language switching");
     }
+    #endif
 
     void testSixStageWidgetEnableMatrix()
     {
@@ -2458,15 +2448,6 @@ int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     QApplication application(argc, argv);
-    if(argc > 1 && std::string(argv[1]) == "--calibration-only") {
-        testWorkpieceCalibrationWidget();
-        if(failures != 0) {
-            std::cerr << failures << " calibration widget assertion(s) failed.\n";
-            return 1;
-        }
-        std::cout << "Workpiece calibration widget regression passed.\n";
-        return 0;
-    }
     testSessionGenerationAndInvalidation();
     testSessionClearRestoresDefaults();
     testTrajectoryWorkspacePersistenceAndInvalidation();
@@ -2482,7 +2463,6 @@ int main(int argc, char** argv)
     testSaveCommitSurvivesViewportReloadFailure();
     testCoordinatorReportsCommittedSaveWarning();
     testWorkflowWidgetsAndTranslations();
-    testWorkpieceCalibrationWidget();
     testSixStageWidgetEnableMatrix();
     testSectionViewRenderingAndInteraction();
     testViewportOverlays();

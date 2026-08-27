@@ -102,6 +102,7 @@ namespace smrobot::workbench::spray::rotationbody
             { "trajectory.edit", "Edit", "编辑轨迹" },
             { "trajectory.remove", "Remove", "删除轨迹" },
             { "trajectory.save_to_group", "Save to Group", "保存到轨迹组" },
+            { "trajectory.export_group", "Save Trajectory Group", "保存轨迹组文件" },
             { "trajectory.transition_after", "Interval to next trajectory", "到下一条轨迹的时间间隔" },
             { "trajectory.pass_summary", "Trajectory %1 | %2 points | %3 s", "轨迹 %1 | %2 点 | %3 秒" },
             { "abb.settings", "ABB RAPID Settings", "ABB RAPID 设置" },

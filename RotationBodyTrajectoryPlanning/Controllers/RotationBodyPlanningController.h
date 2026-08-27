@@ -101,6 +101,7 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult beginNewTrajectory();
         RotationBodyControllerResult loadTrajectoryForEditing(const std::string& passId);
         RotationBodyControllerResult saveCurrentTrajectoryToGroup();
+        RotationBodyControllerResult exportTrajectoryGroupTextFile();
         RotationBodyControllerResult removeTrajectoryPass(const std::string& passId);
         RotationBodyControllerResult setTrajectoryPassVisible(
             const std::string& passId,

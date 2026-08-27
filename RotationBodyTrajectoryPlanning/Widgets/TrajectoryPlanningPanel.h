@@ -47,6 +47,7 @@ namespace smrobot::workbench::spray::rotationbody
         void beginNewTrajectoryRequested();
         void loadTrajectoryRequested(const std::string& passId);
         void saveCurrentTrajectoryRequested();
+        void exportTrajectoryGroupRequested();
         void removeTrajectoryRequested(const std::string& passId);
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
@@ -100,5 +101,6 @@ namespace smrobot::workbench::spray::rotationbody
         QPushButton* m_editButton{ nullptr };
         QPushButton* m_removeButton{ nullptr };
         QPushButton* m_saveToGroupButton{ nullptr };
+        QPushButton* m_exportGroupButton{ nullptr };
     };
 }

@@ -23,8 +23,6 @@ set(SOURCES
     Persistence/RotationBodyTrajectoryProjectStore.h
     Widgets/ModelTransformPanel.cpp
     Widgets/ModelTransformPanel.h
-    Widgets/ABBTranslationPanel.cpp
-    Widgets/ABBTranslationPanel.h
     Widgets/RotationBodyPlanningLeftPanel.cpp
     Widgets/RotationBodyPlanningLeftPanel.h
     Widgets/RotationBodyPlanningRightPanel.cpp
@@ -37,8 +35,6 @@ set(SOURCES
     Widgets/SectionView.h
     Widgets/TrajectoryPlanningPanel.cpp
     Widgets/TrajectoryPlanningPanel.h
-    Widgets/WorkpieceCalibrationPanel.cpp
-    Widgets/WorkpieceCalibrationPanel.h
 )
 
 add_library(${TARGET_NAME} STATIC ${SOURCES})
@@ -55,6 +51,7 @@ target_link_libraries(${TARGET_NAME}
         SMRobotWorkbenchCommon::WorkbenchCommon
         SMRobotPlatform::AssetCore
         SMRobotPlatform::SimulationProject
+        SMRobotSpray::CalibrationInstructionTranslation
         SMRobotSpray::RotationBodyTrajectoryPlanning
         Qt5::Widgets
     PRIVATE
@@ -88,6 +85,7 @@ if(ExportPacakge${PACKAGE_NAME})
         SMRobotWorkbenchCommon::WorkbenchCommon
         SMRobotPlatform::AssetCore
         SMRobotPlatform::SimulationProject
+        SMRobotSpray::CalibrationInstructionTranslation
         SMRobotSpray::RotationBodyTrajectoryPlanning
         Qt5::Widgets
         nlohmann_json::nlohmann_json

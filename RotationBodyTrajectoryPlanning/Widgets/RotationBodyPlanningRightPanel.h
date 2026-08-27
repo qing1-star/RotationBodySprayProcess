@@ -15,11 +15,9 @@ class QToolButton;
 
 namespace smrobot::workbench::spray::rotationbody
 {
-    class ABBTranslationPanel;
     class SectionRegionPanel;
     class SectionView;
     class TrajectoryPlanningPanel;
-    class WorkpieceCalibrationPanel;
 
     class RotationBodyPlanningRightPanel final : public QWidget
     {
@@ -42,8 +40,6 @@ namespace smrobot::workbench::spray::rotationbody
         SectionRegionPanel* sectionRegionPanel() const noexcept;
         SectionView* previewView() const noexcept;
         TrajectoryPlanningPanel* trajectoryPlanningPanel() const noexcept;
-        ABBTranslationPanel* abbTranslationPanel() const noexcept;
-        WorkpieceCalibrationPanel* workpieceCalibrationPanel() const noexcept;
         bool hasVisibleContent() const noexcept;
 
     signals:
@@ -64,22 +60,10 @@ namespace smrobot::workbench::spray::rotationbody
         void beginNewTrajectoryRequested();
         void loadTrajectoryRequested(const std::string& passId);
         void saveCurrentTrajectoryRequested();
+        void exportTrajectoryGroupRequested();
         void removeTrajectoryRequested(const std::string& passId);
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
-        void rapidSettingsEdited(
-            const smrobot::spray::rotationbody::RapidExportSettings& settings);
-        void rapidSequenceEdited(
-            const std::vector<smrobot::spray::rotationbody::RapidSequenceEntry>& sequence);
-        void rapidGenerateRequested(
-            const smrobot::spray::rotationbody::RapidExportSettings& settings,
-            const std::vector<smrobot::spray::rotationbody::RapidSequenceEntry>& sequence);
-        void rapidPreviewStepSelected(int index);
-        void calibrationWorkspaceEdited(
-            const WorkpieceCalibrationWorkspace& workspace);
-        void calibrationBaseTransformCalculated(
-            const smrobot::spray::rotationbody::TransformComponents& components);
-
         void mainViewModeChanged(RotationBodyMainViewMode mode);
         void extractSectionRequested();
         void recognizeRegionsRequested();
@@ -104,14 +88,8 @@ namespace smrobot::workbench::spray::rotationbody
         };
         QButtonGroup* m_buttonGroup{ nullptr };
         QToolButton* m_trajectoryButton{ nullptr };
-        QToolButton* m_abbButton{ nullptr };
-        QToolButton* m_calibrationButton{ nullptr };
         QStackedWidget* m_contentStack{ nullptr };
         QScrollArea* m_trajectoryScrollArea{ nullptr };
-        QScrollArea* m_abbScrollArea{ nullptr };
-        QScrollArea* m_calibrationScrollArea{ nullptr };
         TrajectoryPlanningPanel* m_trajectoryPanel{ nullptr };
-        ABBTranslationPanel* m_abbPanel{ nullptr };
-        WorkpieceCalibrationPanel* m_calibrationPanel{ nullptr };
     };
 }

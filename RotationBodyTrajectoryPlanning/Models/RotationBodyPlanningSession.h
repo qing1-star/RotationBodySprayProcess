@@ -2,12 +2,12 @@
 
 #include <RotationBodyTrajectoryPlanning/Core/PlanningTypes.h>
 #include <RotationBodyTrajectoryPlanning/Core/TriangleMesh.h>
-#include <RotationBodyTrajectoryPlanning/Calibration/WorkpieceCalibration.h>
+#include <CalibrationInstructionTranslation/Calibration/WorkpieceCalibration.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/RegionEditHistory.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/ToothRegionRecognizer.h>
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
 #include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/TrajectoryTypes.h>
-#include <RotationBodyTrajectoryPlanning/ABBTranslation/RapidModuleGenerator.h>
+#include <CalibrationInstructionTranslation/ABBTranslation/RapidModuleGenerator.h>
 
 #include <Eigen/Geometry>
 

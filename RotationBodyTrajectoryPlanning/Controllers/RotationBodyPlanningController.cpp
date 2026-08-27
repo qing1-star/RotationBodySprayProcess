@@ -12,7 +12,8 @@
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/SprayBoundaryBuilder.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/ToothRegionRecognizer.h>
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
-#include <RotationBodyTrajectoryPlanning/ABBTranslation/RapidModuleGenerator.h>
+#include <CalibrationInstructionTranslation/ABBTranslation/RapidModuleGenerator.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/MergedTrajectoryTextExporter.h>
 
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
@@ -38,6 +39,7 @@
 #include <fstream>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 namespace smrobot::workbench::spray::rotationbody
@@ -267,6 +269,31 @@ namespace smrobot::workbench::spray::rotationbody
                 fileName += ".mod";
             }
             return std::filesystem::u8path(settings.outputDirectory) / fileName;
+        }
+
+        std::filesystem::path defaultMergedTrajectoryOutputDirectory()
+        {
+            const std::filesystem::path sourceDataRoot =
+                std::filesystem::absolute(simulation_project::RuntimePaths::sourceRoot()) /
+                "data";
+            std::error_code error;
+            if(std::filesystem::is_directory(sourceDataRoot, error) && !error) {
+                return sourceDataRoot / "traj";
+            }
+            return std::filesystem::absolute(
+                simulation_project::RuntimePaths::dataRoot()) / "traj";
+        }
+
+        std::filesystem::path nextMergedTrajectoryOutputFile(
+            const std::filesystem::path& directory)
+        {
+            for(std::size_t index = 0;; ++index) {
+                const std::filesystem::path candidate = directory /
+                    ("MergedTrajectory_" + std::to_string(index) + "_0.txt");
+                if(!std::filesystem::exists(candidate)) {
+                    return candidate;
+                }
+            }
         }
     }
 
@@ -1300,6 +1327,46 @@ namespace smrobot::workbench::spray::rotationbody
                 .arg(QString::fromStdString(result.value)),
             3000);
         return { true, {} };
+    }
+
+    RotationBodyControllerResult
+    RotationBodyPlanningController::exportTrajectoryGroupTextFile()
+    {
+        const domain::PlanningResult<std::string> formatted =
+            domain::MergedTrajectoryTextExporter::format(
+                m_session.makePublishedTrajectoryPlan());
+        if(!formatted) {
+            return domainFailure(formatted.error, 5000);
+        }
+
+        try {
+            const std::filesystem::path outputDirectory =
+                defaultMergedTrajectoryOutputDirectory();
+            std::filesystem::create_directories(outputDirectory);
+            const std::filesystem::path outputFile =
+                nextMergedTrajectoryOutputFile(outputDirectory);
+            std::ofstream stream(outputFile, std::ios::binary | std::ios::trunc);
+            if(!stream) {
+                throw std::runtime_error("The trajectory output file could not be opened.");
+            }
+            stream.write(
+                formatted.value.data(),
+                static_cast<std::streamsize>(formatted.value.size()));
+            stream.close();
+            if(!std::filesystem::is_regular_file(outputFile) ||
+                std::filesystem::file_size(outputFile) != formatted.value.size()) {
+                throw std::runtime_error("The trajectory output file could not be verified.");
+            }
+            const QString message = QStringLiteral("Trajectory group saved to %1.")
+                .arg(QString::fromStdWString(outputFile.wstring()));
+            publishState(message, 5000);
+            return { true, message };
+        } catch(const std::exception& exception) {
+            return domainFailure({
+                domain::PlanningErrorCode::InvalidArgument,
+                exception.what()
+            }, 5000);
+        }
     }
 
     RotationBodyControllerResult RotationBodyPlanningController::removeTrajectoryPass(
