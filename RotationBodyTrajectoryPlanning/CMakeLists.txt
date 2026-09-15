@@ -55,6 +55,9 @@ target_link_libraries(${TARGET_NAME}
         SMRobotSpray::RotationBodyTrajectoryPlanning
         Qt5::Widgets
     PRIVATE
+        SMRobotApps::RobotViewerCore
+        SMRobotMotionPlanning::MotionPlanningIk
+        SMRobotMotionPlanning::PostModel
         nlohmann_json::nlohmann_json
 )
 
@@ -65,7 +68,7 @@ if(MSVC)
 endif()
 
 set_target_properties(${TARGET_NAME} PROPERTIES
-    FOLDER SMRobotWorkbenchSprayProcess/SprayProcessWorkbench
+    FOLDER SMRobotWorkbenchSprayProcess
     AUTOMOC ON
     DEBUG_POSTFIX ${CMAKE_DEBUG_POSTFIX}
     RELEASE_POSTFIX ${CMAKE_RELEASE_POSTFIX}
@@ -87,6 +90,9 @@ if(ExportPacakge${PACKAGE_NAME})
         SMRobotPlatform::SimulationProject
         SMRobotSpray::CalibrationInstructionTranslation
         SMRobotSpray::RotationBodyTrajectoryPlanning
+        SMRobotApps::RobotViewerCore
+        SMRobotMotionPlanning::MotionPlanningIk
+        SMRobotMotionPlanning::PostModel
         Qt5::Widgets
         nlohmann_json::nlohmann_json
     )

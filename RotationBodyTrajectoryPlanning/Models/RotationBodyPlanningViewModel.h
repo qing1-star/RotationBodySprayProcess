@@ -9,6 +9,12 @@
 
 namespace smrobot::workbench::spray::rotationbody
 {
+    struct PostProcessingRobotOption
+    {
+        std::string id;
+        std::string name;
+    };
+
     struct RotationBodyImportOptions
     {
         domain::PlanningObjectType objectType{ domain::PlanningObjectType::CompletePart };
@@ -47,11 +53,20 @@ namespace smrobot::workbench::spray::rotationbody
         domain::RapidExportSettings rapidSettings;
         std::vector<domain::RapidSequenceEntry> rapidSequence;
         WorkpieceCalibrationWorkspace calibrationWorkspace;
+        std::string calibrationInputDirectory;
         RotationBodyUiState uiState;
         std::optional<domain::RapidModule> rapidModulePreview;
         std::string rapidOutputFile;
         std::string rapidExportStatus;
         bool rapidExportSucceeded{ false };
+        std::vector<PostProcessingRobotOption> postProcessingRobots;
+        std::vector<std::string> postProcessingTemplates;
+        std::string postProcessingRobotId;
+        std::string postProcessingPreview;
+        std::vector<std::string> postProcessingOutputFiles;
+        std::string postProcessingStatus;
+        bool postProcessingTrajectoryLoaded{ false };
+        bool postProcessingExportSucceeded{ false };
         std::array<std::size_t, 5> regionSegmentCounts{};
         bool hasModel{ false };
         bool canEditModelTransform{ false };
@@ -69,6 +84,8 @@ namespace smrobot::workbench::spray::rotationbody
         bool canSaveCurrentTrajectory{ false };
         bool canEditTrajectoryGroup{ false };
         bool canExportRapid{ false };
+        bool canLoadPostProcessingTrajectory{ false };
+        bool canExportPostProcessedProgram{ false };
         bool canSaveProgress{ false };
         bool hasPendingChanges{ false };
         bool isBusy{ false };

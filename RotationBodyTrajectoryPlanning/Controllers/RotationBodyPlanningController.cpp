@@ -14,6 +14,9 @@
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
 #include <CalibrationInstructionTranslation/ABBTranslation/RapidModuleGenerator.h>
 #include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/MergedTrajectoryTextExporter.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/ExecutionSequenceBuilder.h>
+#include <MotionPlanningIk/SprayIkPlanner.h>
+#include <PostModel/PostProgramRunner.h>
 
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
@@ -21,10 +24,13 @@
 #include "RobotQtViewerViewportServices.h"
 #include "SceneEntityWorkflowController.h"
 #include "ViewportReloadWorkflowController.h"
+#include "ProjectRuntimeBuilder.h"
 
+#include <SimulationProject/AssetResolver.h>
 #include <SimulationProject/ProjectDocumentService.h>
 #include <SimulationProject/ProjectSession.h>
 #include <SimulationProject/RuntimePaths.h>
+#include <RobotInstance/RobotInstance.h>
 
 #include <QMetaObject>
 #include <QPointer>
@@ -37,9 +43,12 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace smrobot::workbench::spray::rotationbody
@@ -258,6 +267,19 @@ namespace smrobot::workbench::spray::rotationbody
             return (dataRoot / "ABBrapid").u8string();
         }
 
+        std::string defaultCalibrationInputDirectory()
+        {
+            const std::filesystem::path sourceDirectory =
+                std::filesystem::absolute(simulation_project::RuntimePaths::sourceRoot()) /
+                "data" / "biaodingJSON";
+            if(std::filesystem::is_directory(sourceDirectory)) {
+                return sourceDirectory.u8string();
+            }
+            return (std::filesystem::absolute(
+                simulation_project::RuntimePaths::dataRoot()) /
+                "biaodingJSON").u8string();
+        }
+
         std::filesystem::path rapidOutputFile(const domain::RapidExportSettings& settings)
         {
             std::filesystem::path fileName = std::filesystem::u8path(settings.fileName);
@@ -269,6 +291,40 @@ namespace smrobot::workbench::spray::rotationbody
                 fileName += ".mod";
             }
             return std::filesystem::u8path(settings.outputDirectory) / fileName;
+        }
+
+        std::filesystem::path rapidSchemeOutputFile(
+            const domain::RapidExportSettings& settings)
+        {
+            const std::filesystem::path rotationFile = rapidOutputFile(settings);
+            return rotationFile.parent_path() /
+                (rotationFile.stem().u8string() + "_Scheme" +
+                    rotationFile.extension().u8string());
+        }
+
+        void writeRapidModuleFile(
+            const std::filesystem::path& outputFile,
+            const std::string& code)
+        {
+            std::ofstream stream(outputFile, std::ios::binary | std::ios::trunc);
+            if(!stream) {
+                throw std::runtime_error(
+                    "The ABB RAPID output file could not be opened: " +
+                    outputFile.u8string());
+            }
+            stream.write(code.data(), static_cast<std::streamsize>(code.size()));
+            if(!stream) {
+                throw std::runtime_error(
+                    "The ABB RAPID output file could not be written: " +
+                    outputFile.u8string());
+            }
+            stream.close();
+            if(!std::filesystem::is_regular_file(outputFile) ||
+                std::filesystem::file_size(outputFile) == 0) {
+                throw std::runtime_error(
+                    "The ABB RAPID output file could not be verified: " +
+                    outputFile.u8string());
+            }
         }
 
         std::filesystem::path defaultMergedTrajectoryOutputDirectory()
@@ -295,6 +351,199 @@ namespace smrobot::workbench::spray::rotationbody
                 }
             }
         }
+
+        Eigen::Isometry3d projectTransform(
+            const simulation_project::TransformDesc& transform)
+        {
+            Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
+            result.translation() = Eigen::Vector3d(transform.x, transform.y, transform.z);
+            result.linear() =
+                Eigen::AngleAxisd(transform.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+                Eigen::AngleAxisd(transform.pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
+                Eigen::AngleAxisd(transform.roll, Eigen::Vector3d::UnitX()).toRotationMatrix();
+            return result;
+        }
+
+        std::array<double, 16> postPose(
+            const Eigen::Isometry3d& transform,
+            double translationScale)
+        {
+            std::array<double, 16> result{};
+            for(int row = 0; row < 4; ++row) {
+                for(int column = 0; column < 4; ++column) {
+                    result[static_cast<std::size_t>(row * 4 + column)] =
+                        transform.matrix()(row, column);
+                }
+            }
+            result[3] *= translationScale;
+            result[7] *= translationScale;
+            result[11] *= translationScale;
+            return result;
+        }
+
+        const simulation_project::RobotDesc* findRobot(
+            const simulation_project::ProjectDocument& document,
+            const std::string& robotId)
+        {
+            const auto iterator = std::find_if(
+                document.robots.begin(), document.robots.end(),
+                [&](const simulation_project::RobotDesc& robot) {
+                    return robot.id == robotId;
+                });
+            return iterator == document.robots.end() ? nullptr : &(*iterator);
+        }
+
+        struct ToolDescription
+        {
+            std::string tcpLinkName;
+            Eigen::Isometry3d linkFromTcp = Eigen::Isometry3d::Identity();
+            bool mountedToolFound{ false };
+        };
+
+        ToolDescription findToolDescription(
+            const simulation_project::ProjectDocument& document,
+            const robot::RobotModel& model,
+            const std::string& robotId)
+        {
+            for(const simulation_project::RobotMountDesc& mount : document.robotMounts) {
+                if(mount.robotId != robotId || mount.linkName.empty()) {
+                    continue;
+                }
+                for(const simulation_project::MountedAttachmentDesc& attachment :
+                    document.mountedAttachments) {
+                    if(!attachment.enabled || attachment.mountFrameId != mount.id) {
+                        continue;
+                    }
+                    const auto asset = std::find_if(
+                        document.attachmentAssets.begin(),
+                        document.attachmentAssets.end(),
+                        [&](const simulation_project::AttachmentAssetDesc& candidate) {
+                            return candidate.id == attachment.assetId;
+                        });
+                    if(asset == document.attachmentAssets.end()) {
+                        continue;
+                    }
+                    const simulation_project::AttachmentFunctionalFrameDesc* frame = nullptr;
+                    for(const auto& candidate : asset->functionalFrames) {
+                        if(candidate.primary) {
+                            frame = &candidate;
+                            break;
+                        }
+                    }
+                    if(frame == nullptr && !asset->functionalFrames.empty()) {
+                        frame = &asset->functionalFrames.front();
+                    }
+                    ToolDescription result;
+                    result.tcpLinkName = mount.linkName;
+                    result.linkFromTcp = projectTransform(mount.linkToMount) *
+                        projectTransform(attachment.mountToAssetMount);
+                    if(frame != nullptr) {
+                        result.linkFromTcp = result.linkFromTcp *
+                            projectTransform(frame->assetMountToFrame);
+                    }
+                    result.mountedToolFound = true;
+                    return result;
+                }
+            }
+
+            ToolDescription result;
+            if(!model.tip_links.empty()) {
+                result.tcpLinkName = model.tip_links.front();
+            } else if(!model.linkNames.empty()) {
+                result.tcpLinkName = model.linkNames.back();
+            }
+            return result;
+        }
+
+        std::vector<std::string> sixAxisJointNames(const robot::RobotModel& model)
+        {
+            std::vector<const robot::RobotJoint*> joints;
+            for(const robot::RobotJoint& joint : model.joints) {
+                if(joint.dofIndex >= 0) {
+                    joints.push_back(&joint);
+                }
+            }
+            std::sort(joints.begin(), joints.end(),
+                [](const robot::RobotJoint* lhs, const robot::RobotJoint* rhs) {
+                    return lhs->dofIndex < rhs->dofIndex;
+                });
+            std::vector<std::string> result;
+            result.reserve(joints.size());
+            for(const robot::RobotJoint* joint : joints) {
+                result.push_back(joint->name);
+            }
+            return result;
+        }
+
+        std::vector<double> currentJointSeed(
+            const simulation_project::RobotDesc& robot,
+            const std::vector<std::string>& jointNames,
+            const robot_qt_viewer::RobotQtViewerViewportServices* viewportServices)
+        {
+            std::unordered_map<std::string, double> initial;
+            for(const simulation_project::JointValueDesc& joint : robot.initialJoints) {
+                initial[joint.jointName] = joint.value;
+            }
+            std::vector<double> result;
+            result.reserve(jointNames.size());
+            for(const std::string& jointName : jointNames) {
+                bool currentValueAvailable = false;
+                double value = viewportServices != nullptr
+                    ? viewportServices->robotJointValue(
+                        QString::fromStdString(robot.id),
+                        QString::fromStdString(jointName),
+                        &currentValueAvailable)
+                    : 0.0;
+                if(!currentValueAvailable) {
+                    const auto configured = initial.find(jointName);
+                    value = configured != initial.end() ? configured->second : 0.0;
+                }
+                result.push_back(value);
+            }
+            return result;
+        }
+
+        double targetSpeedMillimetersPerSecond(
+            const domain::PublishedTrajectoryPlan& plan,
+            const domain::TimedExecutionTarget& target)
+        {
+            if(target.kind != domain::TimedExecutionTargetKind::Trajectory) {
+                return plan.safetySpeedMetersPerSecond * 1000.0;
+            }
+            const auto pass = std::find_if(
+                plan.group.passes.begin(), plan.group.passes.end(),
+                [&](const domain::TrajectoryPass& candidate) {
+                    return candidate.id == target.trajectoryPassId;
+                });
+            return pass == plan.group.passes.end()
+                ? plan.safetySpeedMetersPerSecond * 1000.0
+                : pass->trajectory.parameters.speedMetersPerSecond * 1000.0;
+        }
+
+        std::string intermediateProgramPreview(
+            const std::string& robotName,
+            const std::string& tcpLinkName,
+            bool mountedToolFound,
+            const post_model::ProgramRequest& request)
+        {
+            std::ostringstream stream;
+            stream << "Robot: " << robotName << "\n"
+                << "TCP link: " << tcpLinkName << "\n"
+                << "Tool: " << (mountedToolFound ? "mounted tool TCP" : "flange identity") << "\n"
+                << "Commands: " << request.commands.size() << "\n\n";
+            stream << std::fixed << std::setprecision(6);
+            for(std::size_t index = 0; index < request.commands.size(); ++index) {
+                const post_model::MotionCommand& command = request.commands[index];
+                stream << (command.type == post_model::MotionType::Joint ? "MoveJ" : "MoveL")
+                    << " P" << (index + 1) << "  joints(deg)={";
+                for(std::size_t joint = 0; joint < command.jointsDegrees.size(); ++joint) {
+                    if(joint > 0) stream << ", ";
+                    stream << command.jointsDegrees[joint];
+                }
+                stream << "}  speed(mm/s)=" << command.speedMillimetersPerSecond << "\n";
+            }
+            return stream.str();
+        }
     }
 
     struct RotationBodyPlanningController::AsyncImportContext
@@ -313,11 +562,23 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<domain::AlignmentResult> alignment;
     };
 
+    struct RotationBodyPlanningController::PostProcessingState
+    {
+        post_model::ProgramRequest request;
+        std::string robotId;
+        std::string preview;
+        std::vector<std::string> outputFiles;
+        std::string status;
+        bool trajectoryLoaded{ false };
+        bool exportSucceeded{ false };
+    };
+
     RotationBodyPlanningController::RotationBodyPlanningController(
         robot_qt_viewer::RobotQtViewerDocumentContext& context,
         QObject* parent)
         : QObject(parent)
         , m_context(context)
+        , m_postProcessingState(std::make_unique<PostProcessingState>())
     {
         m_workerPool.setMaxThreadCount(1);
     }
@@ -376,11 +637,29 @@ namespace smrobot::workbench::spray::rotationbody
         view.rapidSettings = m_session.rapidSettings();
         view.rapidSequence = m_session.rapidSequence();
         view.calibrationWorkspace = m_session.calibrationWorkspace();
+        view.calibrationInputDirectory = defaultCalibrationInputDirectory();
         view.uiState = m_session.uiState();
         view.rapidModulePreview = m_rapidModulePreview;
         view.rapidOutputFile = m_rapidOutputFile;
         view.rapidExportStatus = m_rapidExportStatus;
         view.rapidExportSucceeded = m_rapidExportSucceeded;
+        for(const simulation_project::RobotDesc& robot : m_context.document().robots) {
+            view.postProcessingRobots.push_back({
+                robot.id,
+                robot.name.empty() ? robot.id : robot.name
+            });
+        }
+        view.postProcessingTemplates = post_model::PostProgramRunner::availableTemplates();
+        if(m_postProcessingState != nullptr) {
+            view.postProcessingRobotId = m_postProcessingState->robotId;
+            view.postProcessingPreview = m_postProcessingState->preview;
+            view.postProcessingOutputFiles = m_postProcessingState->outputFiles;
+            view.postProcessingStatus = m_postProcessingState->status;
+            view.postProcessingTrajectoryLoaded =
+                m_postProcessingState->trajectoryLoaded;
+            view.postProcessingExportSucceeded =
+                m_postProcessingState->exportSucceeded;
+        }
         const domain::PlanningResult<domain::TransformComponents> planningDelta =
             domain::transformComponents(
                 m_session.planningFromMesh() * m_session.automaticBaseline().inverse());
@@ -428,6 +707,14 @@ namespace smrobot::workbench::spray::rotationbody
         view.canEditTrajectoryGroup = commandsEnabled &&
             !view.trajectoryWorkspace.group.passes.empty();
         view.canExportRapid = commandsEnabled && !view.rapidSequence.empty();
+        // Post Processing can consume the saved trajectory group directly. An
+        // ABB instruction sequence is optional here; when it is absent the
+        // loader creates a deterministic safety-point + pass sequence below.
+        view.canLoadPostProcessingTrajectory = commandsEnabled &&
+            !view.trajectoryWorkspace.group.passes.empty() &&
+            !view.postProcessingRobots.empty();
+        view.canExportPostProcessedProgram = commandsEnabled &&
+            view.postProcessingTrajectoryLoaded;
         view.canSaveProgress = commandsEnabled && view.hasModel;
         view.hasPendingChanges = m_session.hasPendingChanges();
         return view;
@@ -1462,45 +1749,45 @@ namespace smrobot::workbench::spray::rotationbody
 
     RotationBodyControllerResult RotationBodyPlanningController::generateAndSaveRapidModule()
     {
-        domain::PlanningResult<domain::RapidModule> generated =
+        domain::PlanningResult<domain::RapidModule> rotationModule =
             domain::RapidModuleGenerator::generate(
                 m_session.makePublishedTrajectoryPlan(),
                 m_session.rapidSettings(),
                 m_session.rapidSequence());
-        if(!generated) {
+        if(!rotationModule) {
             clearRapidPreview();
-            m_rapidExportStatus = generated.error.message;
-            return domainFailure(generated.error, 5000);
+            m_rapidExportStatus = rotationModule.error.message;
+            return domainFailure(rotationModule.error, 5000);
+        }
+        domain::PlanningResult<domain::RapidModule> schemeModule =
+            domain::RapidModuleGenerator::generateScheme(
+                m_session.makePublishedTrajectoryPlan(),
+                m_session.rapidSettings(),
+                m_session.rapidSequence());
+        if(!schemeModule) {
+            clearRapidPreview();
+            m_rapidExportStatus = schemeModule.error.message;
+            return domainFailure(schemeModule.error, 5000);
         }
         try {
             const std::filesystem::path outputFile = rapidOutputFile(m_session.rapidSettings());
+            const std::filesystem::path schemeFile =
+                rapidSchemeOutputFile(m_session.rapidSettings());
             if(m_session.rapidSettings().outputDirectory.empty() || outputFile.filename().empty()) {
                 throw std::runtime_error("Choose an ABB RAPID output directory and file name.");
             }
             std::filesystem::create_directories(outputFile.parent_path());
-            std::ofstream stream(outputFile, std::ios::binary | std::ios::trunc);
-            if(!stream) {
-                throw std::runtime_error("The ABB RAPID output file could not be opened.");
-            }
-            stream.write(
-                generated.value.code.data(),
-                static_cast<std::streamsize>(generated.value.code.size()));
-            if(!stream) {
-                throw std::runtime_error("The ABB RAPID output file could not be written.");
-            }
-            stream.close();
-            if(!std::filesystem::is_regular_file(outputFile) ||
-                std::filesystem::file_size(outputFile) == 0) {
-                throw std::runtime_error("The ABB RAPID output file could not be verified.");
-            }
-            m_rapidModulePreview = std::move(generated.value);
+            writeRapidModuleFile(outputFile, rotationModule.value.code);
+            writeRapidModuleFile(schemeFile, schemeModule.value.code);
+            m_rapidModulePreview = std::move(rotationModule.value);
             m_selectedRapidPreviewStep = m_rapidModulePreview->previewSteps.empty()
                 ? std::optional<std::size_t>()
                 : std::optional<std::size_t>(0);
-            m_rapidOutputFile = outputFile.u8string();
+            m_rapidOutputFile = outputFile.u8string() + "\n" + schemeFile.u8string();
             m_rapidExportSucceeded = true;
-            const QString message = QStringLiteral("ABB RAPID module saved to %1.")
-                .arg(QString::fromStdWString(outputFile.wstring()));
+            const QString message = QStringLiteral("ABB RAPID modules saved to %1 and %2.")
+                .arg(QString::fromStdWString(outputFile.wstring()))
+                .arg(QString::fromStdWString(schemeFile.wstring()));
             m_rapidExportStatus = message.toUtf8().toStdString();
             publishState(message, 5000);
             return { true, message };
@@ -1512,6 +1799,253 @@ namespace smrobot::workbench::spray::rotationbody
                 exception.what()
             }, 5000);
         }
+    }
+
+    RotationBodyControllerResult
+    RotationBodyPlanningController::loadCurrentTrajectoryForPostProcessing(
+        const std::string& robotId)
+    {
+        if(m_busy) {
+            return busyFailure();
+        }
+        if(m_postProcessingState == nullptr) {
+            m_postProcessingState = std::make_unique<PostProcessingState>();
+        }
+        *m_postProcessingState = {};
+        const simulation_project::ProjectDocument& document = m_context.document();
+        const simulation_project::RobotDesc* robotDesc = findRobot(document, robotId);
+        if(robotDesc == nullptr) {
+            const QString message = QStringLiteral("Select a robot that exists in the current project.");
+            m_postProcessingState->status = message.toStdString();
+            publishState(message, 5000);
+            return { false, message };
+        }
+
+        try {
+            const std::filesystem::path projectPath = m_context.projectSession().path();
+            const std::filesystem::path projectBasePath = projectPath.empty()
+                ? std::filesystem::current_path()
+                : (std::filesystem::is_directory(projectPath)
+                    ? projectPath
+                    : projectPath.parent_path());
+            const simulation_project::AssetResolveContext resolveContext =
+                simulation_project::AssetResolver::makeProjectContext(
+                    projectBasePath, document);
+            std::filesystem::path robotPath;
+            if(robotDesc->sourcePath.find("://") != std::string::npos &&
+                !simulation_project::AssetResolver::isAppGeneratedAssetReference(
+                    robotDesc->sourcePath)) {
+                const assetcore::AssetResolveResult resolved =
+                    simulation_project::AssetResolver::resolveProjectReference(
+                        resolveContext, robotDesc->sourcePath);
+                if(!resolved.success()) {
+                    throw std::runtime_error(
+                        "Robot asset resolution failed: " + robotDesc->sourcePath +
+                        (resolved.diagnostic.empty()
+                            ? std::string()
+                            : " (" + resolved.diagnostic + ")"));
+                }
+                robotPath = resolved.resolvedPath;
+            } else {
+                robotPath = simulation_project::AssetResolver::resolveProjectPath(
+                    resolveContext, robotDesc->sourcePath);
+            }
+
+            robot::RobotModel robotModel = ProjectRuntimeBuilder::loadSingleRobot(
+                robotPath,
+                robotDesc->sourceType,
+                robotDesc->sourceModelIndex,
+                simulation_project::AssetResolver::urdfPackageRootsForReference(
+                    resolveContext, robotDesc->sourcePath));
+            const std::vector<std::string> jointNames = sixAxisJointNames(robotModel);
+            if(jointNames.size() != 6) {
+                throw std::runtime_error(
+                    "Post Processing requires a six-axis robot; the selected model has " +
+                    std::to_string(jointNames.size()) + " movable joints.");
+            }
+            const ToolDescription tool = findToolDescription(
+                document, robotModel, robotDesc->id);
+            if(tool.tcpLinkName.empty() ||
+                robotModel.links.find(tool.tcpLinkName) == robotModel.links.end()) {
+                throw std::runtime_error(
+                    "A valid robot flange or TCP link could not be determined.");
+            }
+            const std::vector<double> seed = currentJointSeed(
+                *robotDesc, jointNames, m_context.viewportServices());
+
+            robotinstance::RobotInstance initialRobot(robotModel, "post_processing_seed");
+            initialRobot.setBaseTransform(Eigen::Isometry3d::Identity());
+            initialRobot.setJoints(seed);
+            initialRobot.update();
+            const Eigen::Isometry3d initialBaseFromTcp =
+                initialRobot.getLinkTransform(tool.tcpLinkName) * tool.linkFromTcp;
+
+            domain::PublishedTrajectoryPlan plan =
+                m_session.makePublishedTrajectoryPlan();
+            if(plan.executionSequence.empty()) {
+                // A user may generate forward/return passes without opening
+                // the legacy ABB instruction editor. Preserve that workflow by
+                // deriving the export order from the saved trajectory group.
+                plan.executionSequence.reserve(plan.group.passes.size() + 1);
+                domain::RapidSequenceEntry safety;
+                safety.kind = domain::RapidSequenceEntryKind::SafetyPoint;
+                plan.executionSequence.push_back(std::move(safety));
+                for(const domain::TrajectoryPass& pass : plan.group.passes) {
+                    if(!pass.trajectory.hasValidPoints()) {
+                        continue;
+                    }
+                    domain::RapidSequenceEntry trajectory;
+                    trajectory.kind = domain::RapidSequenceEntryKind::Trajectory;
+                    trajectory.trajectoryPassId = pass.id;
+                    plan.executionSequence.push_back(std::move(trajectory));
+                }
+            }
+            const domain::PlanningResult<domain::TimedExecutionTargets> execution =
+                domain::ExecutionSequenceBuilder::build(plan, initialBaseFromTcp);
+            if(!execution) {
+                throw std::runtime_error(execution.error.message);
+            }
+
+            motion_planning::ik::IkRequest ikRequest;
+            ikRequest.robotModel = &robotModel;
+            // Published rotation-body poses are already expressed in the selected
+            // robot base coordinate system, so IK intentionally uses an identity base.
+            ikRequest.baseTransform = Eigen::Isometry3d::Identity();
+            ikRequest.tcpLinkName = tool.tcpLinkName;
+            ikRequest.linkFromTcp = tool.linkFromTcp;
+            ikRequest.jointNames = jointNames;
+            ikRequest.seed = seed;
+            ikRequest.options.maxIterations = 300;
+            ikRequest.targets.reserve(execution.value.size());
+            for(const domain::TimedExecutionTarget& target : execution.value) {
+                motion_planning::ik::IkTarget ikTarget;
+                ikTarget.timeSeconds = target.timeSeconds;
+                ikTarget.baseFromTcp = target.baseFromTool;
+                ikTarget.safetyPoint =
+                    target.kind == domain::TimedExecutionTargetKind::SafetyPoint;
+                ikRequest.targets.push_back(std::move(ikTarget));
+            }
+            const motion_planning::ik::IkResult ikResult =
+                motion_planning::ik::SprayIkPlanner::solve(ikRequest);
+            if(!ikResult.success ||
+                ikResult.trajectory.points.size() != execution.value.size()) {
+                std::ostringstream message;
+                message << "Inverse kinematics failed";
+                if(!ikResult.diagnostics.empty()) {
+                    const auto& diagnostic = ikResult.diagnostics.front();
+                    message << " at point " << (diagnostic.targetIndex + 1)
+                        << ": " << diagnostic.message
+                        << " (position error "
+                        << diagnostic.positionErrorMeters * 1000.0
+                        << " mm, orientation error "
+                        << diagnostic.orientationErrorRadians * 180.0 /
+                            3.14159265358979323846
+                        << " deg)";
+                }
+                throw std::runtime_error(message.str());
+            }
+
+            post_model::ProgramRequest request;
+            request.robotName = robotDesc->name.empty() ? robotDesc->id : robotDesc->name;
+            request.framePoseMillimeters = postPose(Eigen::Isometry3d::Identity(), 1000.0);
+            request.toolPoseMillimeters = postPose(tool.linkFromTcp, 1000.0);
+            request.commands.reserve(execution.value.size() - 1);
+            constexpr double radiansToDegrees =
+                180.0 / 3.14159265358979323846;
+            for(std::size_t index = 1; index < execution.value.size(); ++index) {
+                const domain::TimedExecutionTarget& target = execution.value[index];
+                const robottrajectory::TimedJointPoint& solved =
+                    ikResult.trajectory.points[index];
+                post_model::MotionCommand command;
+                command.type = target.kind == domain::TimedExecutionTargetKind::SafetyPoint
+                    ? post_model::MotionType::Joint
+                    : post_model::MotionType::Linear;
+                command.poseMillimeters = postPose(target.baseFromTool, 1000.0);
+                command.jointsDegrees.reserve(solved.q.size());
+                for(double jointRadians : solved.q) {
+                    command.jointsDegrees.push_back(jointRadians * radiansToDegrees);
+                }
+                command.speedMillimetersPerSecond =
+                    targetSpeedMillimetersPerSecond(plan, target);
+                request.commands.push_back(std::move(command));
+            }
+            if(request.commands.empty()) {
+                throw std::runtime_error(
+                    "The current execution sequence produced no exportable motion commands.");
+            }
+
+            m_postProcessingState->request = std::move(request);
+            m_postProcessingState->robotId = robotDesc->id;
+            m_postProcessingState->preview = intermediateProgramPreview(
+                m_postProcessingState->request.robotName,
+                tool.tcpLinkName,
+                tool.mountedToolFound,
+                m_postProcessingState->request);
+            m_postProcessingState->trajectoryLoaded = true;
+            m_postProcessingState->status =
+                "The current forward/return trajectory was loaded and all points passed IK.";
+            const QString message = QStringLiteral(
+                "Current trajectory loaded for Post Processing: %1 motion commands.")
+                .arg(m_postProcessingState->request.commands.size());
+            publishState(message, 5000);
+            return { true, message };
+        } catch(const std::exception& exception) {
+            m_postProcessingState->status = exception.what();
+            const QString message = QString::fromUtf8(exception.what());
+            publishState(message, 6000);
+            return { false, message };
+        }
+    }
+
+    RotationBodyControllerResult
+    RotationBodyPlanningController::generatePostProcessedProgram(
+        const std::string& templateName,
+        const std::string& robotId,
+        const std::string& programName,
+        const std::string& outputDirectory)
+    {
+        if(m_busy) {
+            return busyFailure();
+        }
+        if(m_postProcessingState == nullptr ||
+            !m_postProcessingState->trajectoryLoaded) {
+            return {
+                false,
+                QStringLiteral("Load the current trajectory and solve IK before exporting.")
+            };
+        }
+        if(robotId != m_postProcessingState->robotId) {
+            return {
+                false,
+                QStringLiteral("The selected robot changed. Load the current trajectory again.")
+            };
+        }
+
+        post_model::ProgramRequest request = m_postProcessingState->request;
+        request.templateName = templateName;
+        request.programName = programName;
+        request.outputDirectory = outputDirectory;
+        const post_model::ProgramResult generated =
+            post_model::PostProgramRunner::generate(request);
+        m_postProcessingState->exportSucceeded = generated.success;
+        m_postProcessingState->outputFiles = generated.outputFiles;
+        if(!generated.previewText.empty()) {
+            m_postProcessingState->preview = generated.previewText;
+        }
+        if(!generated.success) {
+            m_postProcessingState->status = generated.errorMessage;
+            const QString message = QString::fromUtf8(generated.errorMessage.c_str());
+            publishState(message, 6000);
+            return { false, message };
+        }
+
+        m_postProcessingState->status =
+            "The controller program was generated successfully.";
+        const QString message = QStringLiteral(
+            "Post-processing export completed: %1 file(s).")
+            .arg(generated.outputFiles.size());
+        publishState(message, 5000);
+        return { true, message };
     }
 
     void RotationBodyPlanningController::setSelectedTrajectoryPointIndices(
@@ -2350,6 +2884,9 @@ namespace smrobot::workbench::spray::rotationbody
         m_rapidOutputFile.clear();
         m_rapidExportStatus.clear();
         m_rapidExportSucceeded = false;
+        if(m_postProcessingState != nullptr) {
+            *m_postProcessingState = {};
+        }
     }
 
     void RotationBodyPlanningController::publishState(const QString& message, int timeoutMs)

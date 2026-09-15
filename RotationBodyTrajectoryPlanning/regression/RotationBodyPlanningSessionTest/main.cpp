@@ -21,6 +21,7 @@
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerEventHub.h"
+#include "RobotQtViewerOperationStatus.h"
 #include "RobotQtViewerSelectionModel.h"
 #include "RobotQtViewerViewportPreviewState.h"
 
@@ -86,6 +87,7 @@ namespace
         robot_qt_viewer::RobotQtViewerDocumentController documentController;
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel;
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState;
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore;
         robot_qt_viewer::RobotQtViewerDocumentContext context;
         FakeRotationBodyViewportServices viewport;
         app::RotationBodyPlanningController controller;
@@ -94,12 +96,14 @@ namespace
             : documentController(projectSession, eventHub)
             , selectionModel(eventHub)
             , previewState(eventHub)
+            , operationStatusStore(eventHub)
             , context(
                 projectSession,
                 documentController,
                 selectionModel,
                 previewState,
-                eventHub)
+                eventHub,
+                operationStatusStore)
             , controller(context)
         {
             context.setViewportServices(&viewport);
@@ -1471,12 +1475,14 @@ namespace
             eventHub);
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel(eventHub);
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState(eventHub);
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore(eventHub);
         robot_qt_viewer::RobotQtViewerDocumentContext context(
             projectSession,
             documentController,
             selectionModel,
             previewState,
-            eventHub);
+            eventHub,
+            operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
         projectSession.document().objects.push_back(
@@ -1691,12 +1697,14 @@ namespace
             eventHub);
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel(eventHub);
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState(eventHub);
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore(eventHub);
         robot_qt_viewer::RobotQtViewerDocumentContext context(
             projectSession,
             documentController,
             selectionModel,
             previewState,
-            eventHub);
+            eventHub,
+            operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
         app::RotationBodyPlanningController controller(context);

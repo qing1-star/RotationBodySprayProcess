@@ -216,9 +216,7 @@ public:
         const QString&,
         const QString&) const override { return {}; }
     robot_qt_viewer::CollisionRuntimeRobotSummary robotCollisionSummary(
-        const QString&,
-        const QString& = QString(),
-        const QString& = QString()) const override { return {}; }
+        const QString&) const override { return {}; }
     std::vector<robot_qt_viewer::CollisionRuntimeDetectorInfo>
     collisionRuntimeDetectors() const override { return {}; }
     bool generateRobotCollisionProxies(
