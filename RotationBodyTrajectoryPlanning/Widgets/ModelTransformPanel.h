@@ -7,6 +7,7 @@
 #include <array>
 
 class QButtonGroup;
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QGroupBox;
@@ -42,7 +43,6 @@ namespace smrobot::workbench::spray::rotationbody
             const smrobot::spray::rotationbody::TransformComponents& components);
         void flipRequested();
         void resetRequested();
-        void publishFrameChanged(PublishFrame frame);
         void confirmFrameRequested();
 
     private:
@@ -69,7 +69,8 @@ namespace smrobot::workbench::spray::rotationbody
         void chooseAndRequestImport();
 
         QString m_languageCode{ QStringLiteral("en") };
-        QString m_importDirectory;
+        // This planning workflow is scoped to the user's shared Spray420 asset library.
+        QString m_importDirectory{ QStringLiteral("D:/RS2026-BusinessSource-work/RS2026-1.04/data/Spray420") };
         RotationBodyPlanningViewModel m_viewModel;
         bool m_updating{ false };
 
@@ -78,6 +79,7 @@ namespace smrobot::workbench::spray::rotationbody
         QButtonGroup* m_objectTypeGroup{ nullptr };
         QToolButton* m_completePartButton{ nullptr };
         QToolButton* m_simulationBlockButton{ nullptr };
+        QCheckBox* m_automaticAlignmentCheckBox{ nullptr };
         QWidget* m_simulationControls{ nullptr };
         QLabel* m_diameterLabel{ nullptr };
         QDoubleSpinBox* m_diameterSpin{ nullptr };
@@ -110,9 +112,6 @@ namespace smrobot::workbench::spray::rotationbody
         std::array<QDoubleSpinBox*, 6> m_baseFrameFields{};
 
         QGroupBox* m_publishGroup{ nullptr };
-        QButtonGroup* m_publishButtonGroup{ nullptr };
-        QToolButton* m_publishBaseButton{ nullptr };
-        QToolButton* m_publishLocalButton{ nullptr };
         QPushButton* m_confirmFrameButton{ nullptr };
     };
 }

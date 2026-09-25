@@ -47,6 +47,8 @@ namespace smrobot::workbench::spray::rotationbody
         void reopenBoundaryRequested();
         void trajectoryGenerateRequested(
             const smrobot::spray::rotationbody::TrajectoryGenerationParameters& parameters);
+        void automaticTrajectoriesRequested(int trajectoryCount);
+        void importTrajectoryParametersRequested(const QString& sourcePath);
         void trajectorySwapDirectionRequested();
         void trajectoryDisplayModeChanged(
             smrobot::spray::rotationbody::TrajectoryDisplayMode mode);
@@ -64,6 +66,7 @@ namespace smrobot::workbench::spray::rotationbody
         void removeTrajectoryRequested(const std::string& passId);
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
+        void trajectoryCycleCountChanged(int count);
         void mainViewModeChanged(RotationBodyMainViewMode mode);
         void extractSectionRequested();
         void recognizeRegionsRequested();

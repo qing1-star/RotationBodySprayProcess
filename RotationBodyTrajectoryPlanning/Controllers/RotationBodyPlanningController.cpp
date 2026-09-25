@@ -12,9 +12,11 @@
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/SprayBoundaryBuilder.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/ToothRegionRecognizer.h>
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/AutomaticTrajectoryPlanner.h>
 #include <CalibrationInstructionTranslation/ABBTranslation/RapidModuleGenerator.h>
 #include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/MergedTrajectoryTextExporter.h>
 #include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/ExecutionSequenceBuilder.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/TrajectoryParameterTextParser.h>
 #include <MotionPlanningIk/SprayIkPlanner.h>
 #include <PostModel/PostProgramRunner.h>
 
@@ -247,10 +249,55 @@ namespace smrobot::workbench::spray::rotationbody
             return Eigen::Vector3d(*row[0], *row[1], *row[2]);
         }
 
+        domain::PlanningResult<domain::AlignmentResult> keepOriginalCoordinates(
+            const domain::TriangleMesh& mesh)
+        {
+            const domain::PlanningResult<void> validation = mesh.validate();
+            if(!validation) {
+                return domain::PlanningResult<domain::AlignmentResult>::failure(
+                    validation.error.code,
+                    validation.error.message);
+            }
+            const domain::PlanningResult<Eigen::AlignedBox3d> bounds = mesh.bounds();
+            if(!bounds) {
+                return domain::PlanningResult<domain::AlignmentResult>::failure(
+                    bounds.error.code,
+                    bounds.error.message);
+            }
+
+            // Direct loading deliberately keeps the mesh-to-planning transform
+            // as identity so the source file's coordinates remain untouched.
+            domain::AlignmentResult alignment;
+            alignment.statistics.vertexCount = mesh.vertexCount();
+            alignment.statistics.triangleCount = mesh.triangleCount();
+            alignment.statistics.boundsMinimum = bounds.value.min();
+            alignment.statistics.boundsMaximum = bounds.value.max();
+            alignment.statistics.heightMeters = std::max(
+                0.0,
+                bounds.value.max().z() - bounds.value.min().z());
+            alignment.statistics.maximumDiameterMeters = std::max(
+                0.0,
+                std::max(
+                    bounds.value.max().x() - bounds.value.min().x(),
+                    bounds.value.max().y() - bounds.value.min().y()));
+            alignment.statistics.estimatedAxisInMesh = Eigen::Vector3d::UnitZ();
+            alignment.statistics.axisConfidence = 1.0;
+            alignment.bottomAxisCenterInMesh = Eigen::Vector3d(
+                0.0,
+                0.0,
+                bounds.value.min().z());
+            return domain::PlanningResult<domain::AlignmentResult>::success(
+                std::move(alignment));
+        }
+
         domain::PlanningResult<domain::AlignmentResult> solveAlignment(
             const domain::TriangleMesh& mesh,
             const RotationBodyImportOptions& options)
         {
+            if(options.objectType == domain::PlanningObjectType::CompletePart &&
+                !options.automaticAlignment) {
+                return keepOriginalCoordinates(mesh);
+            }
             return options.objectType == domain::PlanningObjectType::CompletePart
                 ? domain::RotationBodyAlignmentSolver::solve(mesh)
                 : domain::SimulationBlockPlacementSolver::solve(
@@ -278,6 +325,13 @@ namespace smrobot::workbench::spray::rotationbody
             return (std::filesystem::absolute(
                 simulation_project::RuntimePaths::dataRoot()) /
                 "biaodingJSON").u8string();
+        }
+
+        std::string defaultTrajectoryParameterInputDirectory()
+        {
+            return (std::filesystem::absolute(
+                simulation_project::RuntimePaths::dataRoot()) /
+                "trajJSON").u8string();
         }
 
         std::filesystem::path rapidOutputFile(const domain::RapidExportSettings& settings)
@@ -562,6 +616,14 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<domain::AlignmentResult> alignment;
     };
 
+    QString importSuccessMessage(const RotationBodyImportOptions& options)
+    {
+        return options.objectType == domain::PlanningObjectType::CompletePart &&
+            !options.automaticAlignment
+            ? QStringLiteral("The model was loaded with its original coordinates.")
+            : QStringLiteral("The model was loaded and aligned automatically.");
+    }
+
     struct RotationBodyPlanningController::PostProcessingState
     {
         post_model::ProgramRequest request;
@@ -638,6 +700,8 @@ namespace smrobot::workbench::spray::rotationbody
         view.rapidSequence = m_session.rapidSequence();
         view.calibrationWorkspace = m_session.calibrationWorkspace();
         view.calibrationInputDirectory = defaultCalibrationInputDirectory();
+        view.trajectoryParameterInputDirectory =
+            defaultTrajectoryParameterInputDirectory();
         view.uiState = m_session.uiState();
         view.rapidModulePreview = m_rapidModulePreview;
         view.rapidOutputFile = m_rapidOutputFile;
@@ -1306,6 +1370,71 @@ namespace smrobot::workbench::spray::rotationbody
         return updateBaseTransform(domain::makeTransform(components));
     }
 
+    RotationBodyControllerResult RotationBodyPlanningController::calculateAndApplyWorkpieceFrame()
+    {
+        if(m_busy) {
+            return busyFailure();
+        }
+        if(!m_session.hasModel()) {
+            return {
+                false,
+                QStringLiteral("Load a workpiece model before applying the calibrated pose.")
+            };
+        }
+
+        WorkpieceCalibrationWorkspace workspace = m_session.calibrationWorkspace();
+        const std::optional<domain::CalibrationAxisFit>& fit =
+            workspace.axisSource == domain::CalibrationMode::Cylinder3d
+            ? workspace.cylinderFit
+            : workspace.circleFit;
+        if(!fit) {
+            return {
+                false,
+                QStringLiteral("Fit the selected calibration axis before calculating the workpiece frame.")
+            };
+        }
+        const std::optional<Eigen::Vector3d> top = calibrationPoint(workspace.topReference);
+        const std::optional<Eigen::Vector3d> yStart =
+            calibrationPoint(workspace.yDirectionStart);
+        const std::optional<Eigen::Vector3d> yEnd = calibrationPoint(workspace.yDirectionEnd);
+        if(!top || !yStart || !yEnd) {
+            return {
+                false,
+                QStringLiteral("Enter the top, +Y start, and +Y end calibration reference points first.")
+            };
+        }
+
+        const domain::PlanningResult<domain::WorkpieceFrameCalibration> calculated =
+            domain::WorkpieceCalibrationSolver::computeWorkpieceFrame(
+                *fit,
+                *top,
+                workspace.workpieceHeightMeters,
+                *yStart,
+                *yEnd);
+        if(!calculated) {
+            return domainFailure(calculated.error);
+        }
+        workspace.frame = calculated.value;
+        const domain::PlanningResult<void> stored =
+            m_session.setCalibrationWorkspace(std::move(workspace));
+        if(!stored) {
+            return domainFailure(stored.error);
+        }
+        const domain::PlanningResult<void> updated =
+            m_session.setBaseFromPlanning(
+                domain::makeTransform(calculated.value.baseFromPlanningComponents));
+        if(!updated) {
+            return domainFailure(updated.error);
+        }
+        m_session.clearError();
+        if(m_session.publishFrame() == PublishFrame::BaseFrame) {
+            previewAndFocus();
+        }
+        clearRapidPreview();
+        publishState(QStringLiteral("Calculated and applied the workpiece pose."), 3500);
+        return { true, {} };
+    }
+
     RotationBodyControllerResult RotationBodyPlanningController::confirmFrame()
     {
         const domain::PlanningResult<void> result = m_session.confirmFrame();
@@ -1617,6 +1746,93 @@ namespace smrobot::workbench::spray::rotationbody
     }
 
     RotationBodyControllerResult
+    RotationBodyPlanningController::appendAutomaticTrajectories(int trajectoryCount)
+    {
+        if(trajectoryCount != 2 && trajectoryCount != 3) {
+            return domainFailure({
+                domain::PlanningErrorCode::InvalidArgument,
+                "Automatic generation supports exactly two or three trajectories."
+            });
+        }
+        const std::optional<domain::RegionAssignment> regions =
+            m_session.resolvedRegions();
+        if(!m_session.section() || !regions || !m_session.boundary()) {
+            return domainFailure({
+                domain::PlanningErrorCode::InsufficientRegionData,
+                "Confirm the classified spray boundary before automatic generation."
+            });
+        }
+
+        const domain::PlanningResult<domain::AutomaticTrajectoryPlan> planned =
+            domain::AutomaticTrajectoryPlanner::plan(
+                *m_session.section(),
+                *regions,
+                trajectoryCount == 2
+                    ? domain::AutomaticTrajectoryMode::Dual
+                    : domain::AutomaticTrajectoryMode::Triple);
+        if(!planned) {
+            return domainFailure(planned.error, 5000);
+        }
+        const domain::PlanningResult<std::vector<std::string>> appended =
+            m_session.appendGeneratedTrajectories(planned.value.trajectories);
+        if(!appended) {
+            return domainFailure(appended.error, 5000);
+        }
+
+        clearRapidPreview();
+        m_selectedTrajectoryPointIndices.clear();
+        m_session.clearError();
+        const QString message = QStringLiteral("Appended %1 automatically planned trajectories.")
+            .arg(trajectoryCount);
+        publishState(message, 4000);
+        return { true, message };
+    }
+
+    RotationBodyControllerResult
+    RotationBodyPlanningController::importTrajectoryParameterTextFile(
+        const std::filesystem::path& sourcePath)
+    {
+        try {
+            std::ifstream stream(sourcePath, std::ios::binary);
+            if(!stream) {
+                throw std::runtime_error(
+                    "The trajectory parameter TXT could not be opened.");
+            }
+            std::ostringstream buffer;
+            buffer << stream.rdbuf();
+            if(!stream.good() && !stream.eof()) {
+                throw std::runtime_error(
+                    "The trajectory parameter TXT could not be read.");
+            }
+            const domain::PlanningResult<
+                std::vector<domain::TrajectoryGenerationParameters>> parsed =
+                    domain::TrajectoryParameterTextParser::parse(buffer.str());
+            if(!parsed) {
+                return domainFailure(parsed.error, 5000);
+            }
+            const domain::PlanningResult<std::vector<std::string>> appended =
+                m_session.appendGeneratedTrajectories(parsed.value);
+            if(!appended) {
+                return domainFailure(appended.error, 5000);
+            }
+
+            clearRapidPreview();
+            m_selectedTrajectoryPointIndices.clear();
+            m_session.clearError();
+            const QString message = QStringLiteral("Appended %1 trajectories from %2.")
+                .arg(static_cast<qulonglong>(appended.value.size()))
+                .arg(QString::fromStdWString(sourcePath.filename().wstring()));
+            publishState(message, 5000);
+            return { true, message };
+        } catch(const std::exception& exception) {
+            return domainFailure({
+                domain::PlanningErrorCode::InvalidArgument,
+                exception.what()
+            }, 5000);
+        }
+    }
+
+    RotationBodyControllerResult
     RotationBodyPlanningController::exportTrajectoryGroupTextFile()
     {
         const domain::PlanningResult<std::string> formatted =
@@ -1696,6 +1912,15 @@ namespace smrobot::workbench::spray::rotationbody
             return domainFailure(result.error);
         }
         clearRapidPreview();
+        m_session.clearError();
+        publishState();
+        return { true, {} };
+    }
+
+    RotationBodyControllerResult RotationBodyPlanningController::setTrajectoryCycleCount(int count)
+    {
+        const domain::PlanningResult<void> result = m_session.setTrajectoryCycleCount(count);
+        if(!result) return domainFailure(result.error);
         m_session.clearError();
         publishState();
         return { true, {} };
@@ -2466,6 +2691,18 @@ namespace smrobot::workbench::spray::rotationbody
         if(!m_session.hasModel()) {
             return { false, QStringLiteral("There is no rotation-body planning model to save.") };
         }
+
+        // The project-level save is the final commit point for planning.  A
+        // trajectory being edited must therefore replace its saved pass before
+        // publishing, otherwise downstream workbenches would read stale values.
+        if(m_session.trajectoryWorkspace().currentTrajectory) {
+            const domain::PlanningResult<std::string> savedTrajectory =
+                m_session.saveCurrentTrajectoryToGroup();
+            if(!savedTrajectory) {
+                return domainFailure(savedTrajectory.error);
+            }
+        }
+
         const RotationBodyPlanningDraft draft = m_session.makeDraft();
         const RotationBodyTrajectoryDraft trajectoryDraft =
             m_session.makeTrajectoryDraft();
@@ -2613,7 +2850,7 @@ namespace smrobot::workbench::spray::rotationbody
         }
         return {
             true,
-            QStringLiteral("The model was loaded and aligned automatically.")
+            importSuccessMessage(options)
         };
     }
 
@@ -2782,7 +3019,7 @@ namespace smrobot::workbench::spray::rotationbody
         previewAndFocus();
         m_session.clearError();
         const QString message =
-            QStringLiteral("The model was loaded and aligned automatically.");
+            importSuccessMessage(context->options);
         finishAsyncOperation({ true, {} }, message, 3000);
     }
 

@@ -10,6 +10,9 @@ add_executable(${TARGET_NAME}
 target_link_libraries(${TARGET_NAME}
     PRIVATE
         RotationBodyTrajectoryPlanningEditor
+        SMRobotPlatform::RenderCore
+        SMRobotPlatform::RobotRenderBridge
+        SMRobotPlatform::SceneCore
 )
 
 target_compile_definitions(${TARGET_NAME}

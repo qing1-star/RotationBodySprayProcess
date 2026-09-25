@@ -48,7 +48,6 @@ namespace smrobot::workbench::spray::rotationbody
             const smrobot::spray::rotationbody::TransformComponents& components);
         void flipRequested();
         void resetRequested();
-        void publishFrameChanged(PublishFrame frame);
         void confirmFrameRequested();
         void mainViewModeChanged(RotationBodyMainViewMode mode);
         void extractSectionRequested();

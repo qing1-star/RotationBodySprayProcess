@@ -95,8 +95,6 @@ namespace smrobot::workbench::spray::rotationbody
             this, &RotationBodyPlanningLeftPanel::flipRequested);
         connect(m_modelTransformPanel, &ModelTransformPanel::resetRequested,
             this, &RotationBodyPlanningLeftPanel::resetRequested);
-        connect(m_modelTransformPanel, &ModelTransformPanel::publishFrameChanged,
-            this, &RotationBodyPlanningLeftPanel::publishFrameChanged);
         connect(m_modelTransformPanel, &ModelTransformPanel::confirmFrameRequested,
             this, &RotationBodyPlanningLeftPanel::confirmFrameRequested);
         connect(m_sectionRegionPanel, &SectionRegionPanel::mainViewModeChanged,

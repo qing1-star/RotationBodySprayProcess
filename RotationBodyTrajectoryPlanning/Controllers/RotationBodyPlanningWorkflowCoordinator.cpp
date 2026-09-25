@@ -324,14 +324,6 @@ namespace smrobot::workbench::spray::rotationbody
         connect(&m_leftPanel, &RotationBodyPlanningLeftPanel::resetRequested, this, [this]() {
             reportResult(m_controller.resetModelTransform(), "status.alignment_reset");
         });
-        connect(
-            &m_leftPanel,
-            &RotationBodyPlanningLeftPanel::publishFrameChanged,
-            this,
-            [this](PublishFrame frame) {
-                m_controller.setPublishFrame(frame);
-                refresh();
-            });
         connect(&m_leftPanel, &RotationBodyPlanningLeftPanel::confirmFrameRequested, this, [this]() {
             reportResult(m_controller.confirmFrame());
         });
@@ -439,6 +431,21 @@ namespace smrobot::workbench::spray::rotationbody
             });
         connect(
             &m_rightPanel,
+            &RotationBodyPlanningRightPanel::automaticTrajectoriesRequested,
+            this,
+            [this](int trajectoryCount) {
+                reportResult(m_controller.appendAutomaticTrajectories(trajectoryCount));
+            });
+        connect(
+            &m_rightPanel,
+            &RotationBodyPlanningRightPanel::importTrajectoryParametersRequested,
+            this,
+            [this](const QString& sourcePath) {
+                reportResult(m_controller.importTrajectoryParameterTextFile(
+                    std::filesystem::path(sourcePath.toStdWString())));
+            });
+        connect(
+            &m_rightPanel,
             &RotationBodyPlanningRightPanel::trajectorySwapDirectionRequested,
             this,
             [this]() {
@@ -517,6 +524,12 @@ namespace smrobot::workbench::spray::rotationbody
             this,
             [this](const std::string& passId, double seconds) {
                 reportResult(m_controller.setTrajectoryTransitionAfter(passId, seconds));
+            });
+        connect(&m_rightPanel,
+            &RotationBodyPlanningRightPanel::trajectoryCycleCountChanged,
+            this,
+            [this](int count) {
+                reportResult(m_controller.setTrajectoryCycleCount(count));
             });
     }
 }

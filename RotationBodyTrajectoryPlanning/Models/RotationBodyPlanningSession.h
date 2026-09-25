@@ -223,6 +223,8 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<void> beginNewTrajectory();
         domain::PlanningResult<void> loadTrajectoryForEditing(const std::string& passId);
         domain::PlanningResult<std::string> saveCurrentTrajectoryToGroup();
+        domain::PlanningResult<std::vector<std::string>> appendGeneratedTrajectories(
+            const std::vector<domain::TrajectoryGenerationParameters>& parameters);
         domain::PlanningResult<void> removeTrajectoryPass(const std::string& passId);
         domain::PlanningResult<void> setTrajectoryPassVisible(
             const std::string& passId,
@@ -230,6 +232,7 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<void> setTrajectoryTransitionAfter(
             const std::string& passId,
             double seconds);
+        domain::PlanningResult<void> setTrajectoryCycleCount(int count);
 
         const domain::RapidExportSettings& rapidSettings() const noexcept;
         const std::vector<domain::RapidSequenceEntry>& rapidSequence() const noexcept;

@@ -40,6 +40,10 @@ namespace smrobot::workbench::spray::rotationbody
             this, &RotationBodyPlanningRightPanel::reopenBoundaryRequested);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::generateRequested,
             this, &RotationBodyPlanningRightPanel::trajectoryGenerateRequested);
+        connect(m_trajectoryPanel, &TrajectoryPlanningPanel::automaticTrajectoriesRequested,
+            this, &RotationBodyPlanningRightPanel::automaticTrajectoriesRequested);
+        connect(m_trajectoryPanel, &TrajectoryPlanningPanel::importTrajectoryParametersRequested,
+            this, &RotationBodyPlanningRightPanel::importTrajectoryParametersRequested);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::swapDirectionRequested,
             this, &RotationBodyPlanningRightPanel::trajectorySwapDirectionRequested);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::displayModeChanged,
@@ -64,6 +68,8 @@ namespace smrobot::workbench::spray::rotationbody
             this, &RotationBodyPlanningRightPanel::trajectoryVisibilityChanged);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::trajectoryTransitionChanged,
             this, &RotationBodyPlanningRightPanel::trajectoryTransitionChanged);
+        connect(m_trajectoryPanel, &TrajectoryPlanningPanel::trajectoryCycleCountChanged,
+            this, &RotationBodyPlanningRightPanel::trajectoryCycleCountChanged);
         retranslate();
         setCurrentRightWorkflow(m_currentRightWorkflow);
     }

@@ -18,6 +18,7 @@ namespace smrobot::workbench::spray::rotationbody
     struct RotationBodyImportOptions
     {
         domain::PlanningObjectType objectType{ domain::PlanningObjectType::CompletePart };
+        bool automaticAlignment{ true };
         domain::SignedAxis originalRotationAxis{ domain::SignedAxis::PositiveZ };
         domain::SignedAxis toothOutwardAxis{ domain::SignedAxis::PositiveY };
         double motherMaximumDiameterMeters{ 0.0 };
@@ -54,6 +55,7 @@ namespace smrobot::workbench::spray::rotationbody
         std::vector<domain::RapidSequenceEntry> rapidSequence;
         WorkpieceCalibrationWorkspace calibrationWorkspace;
         std::string calibrationInputDirectory;
+        std::string trajectoryParameterInputDirectory;
         RotationBodyUiState uiState;
         std::optional<domain::RapidModule> rapidModulePreview;
         std::string rapidOutputFile;

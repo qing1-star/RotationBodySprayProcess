@@ -2,6 +2,7 @@
 
 #include "../Models/RotationBodyPlanningSession.h"
 
+#include <RotationBodyTrajectoryPlanning/Persistence/PublishedTrajectoryPlanContract.h>
 #include <SimulationProject/ProjectDocument.h>
 
 #include <optional>
@@ -44,11 +45,13 @@ namespace smrobot::workbench::spray::rotationbody
     class RotationBodyTrajectoryProjectStore
     {
     public:
-        static constexpr int currentVersion = 1;
+        static constexpr int workspaceVersion = 1;
+        static constexpr int currentVersion =
+            smrobot::spray::rotationbody::kPublishedTrajectoryPlanSchemaVersion;
         static constexpr const char* workspaceExtensionKey =
             "spray.rotation_body_trajectory_planning.trajectory_draft";
         static constexpr const char* publishedExtensionKey =
-            "spray.rotation_body_trajectory_planning.trajectory_plan";
+            smrobot::spray::rotationbody::kPublishedTrajectoryPlanExtensionKey;
 
         static bool writeWorkspace(
             simulation_project::ProjectDocument& document,

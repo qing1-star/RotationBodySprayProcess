@@ -5,6 +5,7 @@
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/SprayBoundaryBuilder.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/ToothRegionRecognizer.h>
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/AutomaticTrajectoryPlanner.h>
 
 #include <SimulationProject/ProjectDocument.h>
 #include <SimulationProject/ProjectSession.h>
@@ -586,6 +587,36 @@ namespace
                 contourBounds.max().y() - 0.05 * contourAxialRange,
                 model,
                 "the tooth wall connected directly to the top edge must not become Transition");
+            const auto dualPlan = domain::AutomaticTrajectoryPlanner::plan(
+                contour,
+                assignment,
+                domain::AutomaticTrajectoryMode::Dual);
+            const auto triplePlan = domain::AutomaticTrajectoryPlanner::plan(
+                contour,
+                assignment,
+                domain::AutomaticTrajectoryMode::Triple);
+            require(dualPlan.ok() && dualPlan.value.trajectories.size() == 2,
+                model,
+                "the classified simulation block must support automatic dual trajectories");
+            require(triplePlan.ok() && triplePlan.value.trajectories.size() == 3,
+                model,
+                "the classified simulation block must support automatic triple trajectories");
+            if(dualPlan && dualPlan.value.trajectories.size() == 2) {
+                require(dualPlan.value.trajectories[0].tiltRadians >= 0.0 &&
+                        dualPlan.value.trajectories[1].tiltRadians <= 0.0 &&
+                        std::abs(dualPlan.value.trajectories[0].tiltRadians) <=
+                            dualPlan.value.dualTiltLimitRadians + 1.0e-12 &&
+                        std::abs(dualPlan.value.trajectories[1].tiltRadians) <=
+                            dualPlan.value.dualTiltLimitRadians + 1.0e-12,
+                    model,
+                    "dual upper/lower tilts must retain their signs and coverage limit");
+            }
+            if(triplePlan && triplePlan.value.trajectories.size() == 3) {
+                require(triplePlan.value.trajectories[0].tiltRadians >
+                            triplePlan.value.trajectories[1].tiltRadians,
+                    model,
+                    "triple upper and lower wall trajectories must retain distinct tilts");
+            }
         }
         const std::string fourthFixtureSuffix = "4.stl";
         if(model.size() >= fourthFixtureSuffix.size() &&

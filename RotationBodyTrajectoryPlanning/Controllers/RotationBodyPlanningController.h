@@ -73,6 +73,7 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult updateBaseTransform(const Eigen::Isometry3d& transform);
         RotationBodyControllerResult updateBaseComponents(
             const domain::TransformComponents& components);
+        RotationBodyControllerResult calculateAndApplyWorkpieceFrame();
         RotationBodyControllerResult confirmFrame();
         void setPublishFrame(PublishFrame frame);
         RotationBodyControllerResult extractSection();
@@ -101,6 +102,9 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult beginNewTrajectory();
         RotationBodyControllerResult loadTrajectoryForEditing(const std::string& passId);
         RotationBodyControllerResult saveCurrentTrajectoryToGroup();
+        RotationBodyControllerResult appendAutomaticTrajectories(int trajectoryCount);
+        RotationBodyControllerResult importTrajectoryParameterTextFile(
+            const std::filesystem::path& sourcePath);
         RotationBodyControllerResult exportTrajectoryGroupTextFile();
         RotationBodyControllerResult removeTrajectoryPass(const std::string& passId);
         RotationBodyControllerResult setTrajectoryPassVisible(
@@ -109,6 +113,7 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult setTrajectoryTransitionAfter(
             const std::string& passId,
             double seconds);
+        RotationBodyControllerResult setTrajectoryCycleCount(int count);
         RotationBodyControllerResult updateRapidSettings(
             const domain::RapidExportSettings& settings);
         RotationBodyControllerResult updateRapidSequence(

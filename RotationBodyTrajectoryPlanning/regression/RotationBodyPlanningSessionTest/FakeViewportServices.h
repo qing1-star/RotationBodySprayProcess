@@ -288,4 +288,11 @@ public:
     }
     void setRobotJointValue(const QString&, const QString&, double) override {}
     void setRobotAutoMotion(const QString&, bool, double, double) override {}
+    void setTrajectoryControlPointOverlay(
+        const QString&,
+        const std::vector<simulation_project::TransformDesc>&) override {}
+    void clearTrajectoryControlPointOverlay() override {}
+    void setSprayRangeVisible(const QString&, bool) override {}
+    robot_qt_viewer::SprayMeasurementResult sprayMeasurement(
+        const QString&) const override { return {}; }
 };
