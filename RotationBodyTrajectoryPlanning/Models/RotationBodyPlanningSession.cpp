@@ -90,11 +90,14 @@ namespace smrobot::workbench::spray::rotationbody
         bool validTrajectoryParameters(
             const domain::TrajectoryGenerationParameters& parameters) noexcept
         {
-            constexpr double pi = 3.14159265358979323846;
             return std::isfinite(parameters.sprayDistanceMeters) &&
-                parameters.sprayDistanceMeters > 0.0 &&
+                parameters.sprayDistanceMeters >=
+                    domain::TrajectoryPlanner::minimumSprayDistanceMeters &&
+                parameters.sprayDistanceMeters <=
+                    domain::TrajectoryPlanner::maximumSprayDistanceMeters &&
                 std::isfinite(parameters.tiltRadians) &&
-                std::abs(parameters.tiltRadians) < 80.0 * pi / 180.0 &&
+                std::abs(parameters.tiltRadians) <=
+                    domain::TrajectoryPlanner::maximumAbsoluteTiltRadians &&
                 std::isfinite(parameters.speedMetersPerSecond) &&
                 parameters.speedMetersPerSecond > 0.0 &&
                 std::isfinite(parameters.startExtensionMeters) &&
@@ -102,8 +105,7 @@ namespace smrobot::workbench::spray::rotationbody
                 std::isfinite(parameters.endExtensionMeters) &&
                 parameters.endExtensionMeters >= 0.0 &&
                 (parameters.pointCount == 0 ||
-                    (parameters.pointCount >= domain::TrajectoryPlanner::minimumPointCount &&
-                        parameters.pointCount <= domain::TrajectoryPlanner::maximumPointCount)) &&
+                    parameters.pointCount >= domain::TrajectoryPlanner::minimumPointCount) &&
                 std::isfinite(parameters.positionerRpm);
         }
 
@@ -569,6 +571,14 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PublishedTrajectoryPlan plan;
         plan.objectId = m_objectId;
         plan.baseFromPlanning = m_baseFromPlanning;
+        plan.planningFromMesh = m_planningFromMesh;
+        if(m_section) {
+            const std::optional<domain::RegionAssignment> resolved = resolvedRegions();
+            if(resolved && resolved->matches(*m_section)) {
+                plan.section = *m_section;
+                plan.regions = *resolved;
+            }
+        }
         plan.group = m_trajectoryWorkspace.group;
         plan.safetyPositionBaseMeters = m_rapidSettings.safetyPositionBaseMeters;
         plan.safetySpeedMetersPerSecond = m_rapidSettings.safetySpeedMetersPerSecond;
@@ -959,7 +969,8 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<domain::PlannedTrajectory> generated =
             domain::TrajectoryPlanner::generate(
                 *generationBoundary,
-                m_trajectoryWorkspace.parameters);
+                m_trajectoryWorkspace.parameters,
+                m_baseFromPlanning);
         if(!generated) {
             return domain::PlanningResult<void>::failure(
                 generated.error.code,
@@ -1087,6 +1098,59 @@ namespace smrobot::workbench::spray::rotationbody
         return saved;
     }
 
+    domain::PlanningResult<std::vector<std::string>>
+    RotationBodyPlanningSession::appendGeneratedTrajectories(
+        const std::vector<domain::TrajectoryGenerationParameters>& parameters)
+    {
+        if(!m_boundary) {
+            return domain::PlanningResult<std::vector<std::string>>::failure(
+                domain::PlanningErrorCode::InsufficientRegionData,
+                "Confirm the spray boundary before generating trajectories.");
+        }
+        if(parameters.empty()) {
+            return domain::PlanningResult<std::vector<std::string>>::failure(
+                domain::PlanningErrorCode::InvalidArgument,
+                "At least one trajectory parameter set is required.");
+        }
+
+        domain::TrajectoryGroup candidate = m_trajectoryWorkspace.group;
+        std::vector<std::string> addedIds;
+        addedIds.reserve(parameters.size());
+        for(const domain::TrajectoryGenerationParameters& item : parameters) {
+            if(!validTrajectoryParameters(item)) {
+                return domain::PlanningResult<std::vector<std::string>>::failure(
+                    domain::PlanningErrorCode::InvalidArgument,
+                    "A trajectory parameter set is outside the supported ranges.");
+            }
+            domain::PlanningResult<domain::PlannedTrajectory> generated =
+                domain::TrajectoryPlanner::generate(
+                    *m_boundary,
+                    item,
+                    m_baseFromPlanning);
+            if(!generated) {
+                return domain::PlanningResult<std::vector<std::string>>::failure(
+                    generated.error.code,
+                    generated.error.message);
+            }
+            domain::PlanningResult<std::string> added =
+                domain::TrajectoryGroupEditor::addOrUpdate(
+                    candidate,
+                    generated.value,
+                    {});
+            if(!added) {
+                return domain::PlanningResult<std::vector<std::string>>::failure(
+                    added.error.code,
+                    added.error.message);
+            }
+            addedIds.push_back(std::move(added.value));
+        }
+
+        m_trajectoryWorkspace.group = std::move(candidate);
+        m_hasPendingChanges = true;
+        return domain::PlanningResult<std::vector<std::string>>::success(
+            std::move(addedIds));
+    }
+
     domain::PlanningResult<void> RotationBodyPlanningSession::removeTrajectoryPass(
         const std::string& passId)
     {
@@ -1138,6 +1202,20 @@ namespace smrobot::workbench::spray::rotationbody
             m_hasPendingChanges = true;
         }
         return result;
+    }
+
+    domain::PlanningResult<void> RotationBodyPlanningSession::setTrajectoryCycleCount(int count)
+    {
+        if(count < 1 || count > 100) {
+            return domain::PlanningResult<void>::failure(
+                domain::PlanningErrorCode::InvalidArgument,
+                "Trajectory group cycle count must be between 1 and 100.");
+        }
+        if(m_trajectoryWorkspace.group.cycleCount != static_cast<std::size_t>(count)) {
+            m_trajectoryWorkspace.group.cycleCount = static_cast<std::size_t>(count);
+            m_hasPendingChanges = true;
+        }
+        return domain::PlanningResult<void>::success();
     }
 
     const domain::RapidExportSettings& RotationBodyPlanningSession::rapidSettings() const noexcept

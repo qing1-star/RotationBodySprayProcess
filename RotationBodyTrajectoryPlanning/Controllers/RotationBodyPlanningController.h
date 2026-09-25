@@ -73,6 +73,7 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult updateBaseTransform(const Eigen::Isometry3d& transform);
         RotationBodyControllerResult updateBaseComponents(
             const domain::TransformComponents& components);
+        RotationBodyControllerResult calculateAndApplyWorkpieceFrame();
         RotationBodyControllerResult confirmFrame();
         void setPublishFrame(PublishFrame frame);
         RotationBodyControllerResult extractSection();
@@ -101,6 +102,10 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult beginNewTrajectory();
         RotationBodyControllerResult loadTrajectoryForEditing(const std::string& passId);
         RotationBodyControllerResult saveCurrentTrajectoryToGroup();
+        RotationBodyControllerResult appendAutomaticTrajectories(int trajectoryCount);
+        RotationBodyControllerResult importTrajectoryParameterTextFile(
+            const std::filesystem::path& sourcePath);
+        RotationBodyControllerResult exportTrajectoryGroupTextFile();
         RotationBodyControllerResult removeTrajectoryPass(const std::string& passId);
         RotationBodyControllerResult setTrajectoryPassVisible(
             const std::string& passId,
@@ -108,6 +113,7 @@ namespace smrobot::workbench::spray::rotationbody
         RotationBodyControllerResult setTrajectoryTransitionAfter(
             const std::string& passId,
             double seconds);
+        RotationBodyControllerResult setTrajectoryCycleCount(int count);
         RotationBodyControllerResult updateRapidSettings(
             const domain::RapidExportSettings& settings);
         RotationBodyControllerResult updateRapidSequence(
@@ -116,6 +122,13 @@ namespace smrobot::workbench::spray::rotationbody
             WorkpieceCalibrationWorkspace workspace);
         void updateUiState(const RotationBodyUiState& state);
         RotationBodyControllerResult generateAndSaveRapidModule();
+        RotationBodyControllerResult loadCurrentTrajectoryForPostProcessing(
+            const std::string& robotId);
+        RotationBodyControllerResult generatePostProcessedProgram(
+            const std::string& templateName,
+            const std::string& robotId,
+            const std::string& programName,
+            const std::string& outputDirectory);
         void setSelectedTrajectoryPointIndices(std::vector<std::size_t> indices);
         void setSelectedRapidPreviewStep(std::optional<std::size_t> index);
         // Presentation-only visibility for calibration helpers while the main
@@ -135,6 +148,7 @@ namespace smrobot::workbench::spray::rotationbody
     private:
         struct AsyncImportContext;
         struct AsyncImportResult;
+        struct PostProcessingState;
 
         static simulation_project::TransformDesc transformDesc(const Eigen::Isometry3d& transform);
         static const simulation_project::SceneObjectDesc* findObject(
@@ -189,5 +203,6 @@ namespace smrobot::workbench::spray::rotationbody
         std::string m_rapidOutputFile;
         std::string m_rapidExportStatus;
         bool m_rapidExportSucceeded{ false };
+        std::unique_ptr<PostProcessingState> m_postProcessingState;
     };
 }

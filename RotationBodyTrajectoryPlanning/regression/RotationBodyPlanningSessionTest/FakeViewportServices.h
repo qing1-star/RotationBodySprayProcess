@@ -216,9 +216,7 @@ public:
         const QString&,
         const QString&) const override { return {}; }
     robot_qt_viewer::CollisionRuntimeRobotSummary robotCollisionSummary(
-        const QString&,
-        const QString& = QString(),
-        const QString& = QString()) const override { return {}; }
+        const QString&) const override { return {}; }
     std::vector<robot_qt_viewer::CollisionRuntimeDetectorInfo>
     collisionRuntimeDetectors() const override { return {}; }
     bool generateRobotCollisionProxies(
@@ -290,4 +288,11 @@ public:
     }
     void setRobotJointValue(const QString&, const QString&, double) override {}
     void setRobotAutoMotion(const QString&, bool, double, double) override {}
+    void setTrajectoryControlPointOverlay(
+        const QString&,
+        const std::vector<simulation_project::TransformDesc>&) override {}
+    void clearTrajectoryControlPointOverlay() override {}
+    void setSprayRangeVisible(const QString&, bool) override {}
+    robot_qt_viewer::SprayMeasurementResult sprayMeasurement(
+        const QString&) const override { return {}; }
 };

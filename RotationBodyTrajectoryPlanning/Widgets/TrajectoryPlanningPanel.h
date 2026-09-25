@@ -10,11 +10,13 @@
 #include <vector>
 
 class QDoubleSpinBox;
+class QFormLayout;
 class QGroupBox;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QSpinBox;
 
 namespace smrobot::workbench::spray::rotationbody
 {
@@ -34,6 +36,8 @@ namespace smrobot::workbench::spray::rotationbody
         void reopenBoundaryRequested();
         void generateRequested(
             const smrobot::spray::rotationbody::TrajectoryGenerationParameters& parameters);
+        void automaticTrajectoriesRequested(int trajectoryCount);
+        void importTrajectoryParametersRequested(const QString& sourcePath);
         void swapDirectionRequested();
         void displayModeChanged(
             smrobot::spray::rotationbody::TrajectoryDisplayMode mode);
@@ -47,9 +51,11 @@ namespace smrobot::workbench::spray::rotationbody
         void beginNewTrajectoryRequested();
         void loadTrajectoryRequested(const std::string& passId);
         void saveCurrentTrajectoryRequested();
+        void exportTrajectoryGroupRequested();
         void removeTrajectoryRequested(const std::string& passId);
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
+        void trajectoryCycleCountChanged(int count);
 
     private:
         domain::TrajectoryGenerationParameters inputParameters() const;
@@ -57,6 +63,8 @@ namespace smrobot::workbench::spray::rotationbody
         std::string selectedPassId() const;
         void rebuildPointList();
         void rebuildPassList();
+        void rebuildTransitionControls();
+        void syncTransitionControls();
         void updateEnabledState();
         void retranslate();
 
@@ -74,6 +82,9 @@ namespace smrobot::workbench::spray::rotationbody
         QDoubleSpinBox* m_positionerRpmSpin{ nullptr };
         QPushButton* m_reopenBoundaryButton{ nullptr };
         QPushButton* m_generateButton{ nullptr };
+        QPushButton* m_autoTwoButton{ nullptr };
+        QPushButton* m_autoThreeButton{ nullptr };
+        QPushButton* m_importParametersButton{ nullptr };
         QPushButton* m_swapButton{ nullptr };
         QPushButton* m_displayModeButton{ nullptr };
 
@@ -94,11 +105,16 @@ namespace smrobot::workbench::spray::rotationbody
 
         QGroupBox* m_groupGroup{ nullptr };
         QListWidget* m_passList{ nullptr };
-        QLabel* m_transitionLabel{ nullptr };
-        QDoubleSpinBox* m_transitionSpin{ nullptr };
+        QWidget* m_transitionContainer{ nullptr };
+        QFormLayout* m_transitionLayout{ nullptr };
+        std::vector<QDoubleSpinBox*> m_transitionSpins;
+        std::vector<std::string> m_transitionPassIds;
         QPushButton* m_newButton{ nullptr };
         QPushButton* m_editButton{ nullptr };
         QPushButton* m_removeButton{ nullptr };
         QPushButton* m_saveToGroupButton{ nullptr };
+        QPushButton* m_exportGroupButton{ nullptr };
+        QLabel* m_cycleCountLabel{ nullptr };
+        QSpinBox* m_cycleCountSpin{ nullptr };
     };
 }

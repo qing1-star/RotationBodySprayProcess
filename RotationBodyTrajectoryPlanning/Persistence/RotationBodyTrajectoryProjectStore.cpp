@@ -102,6 +102,97 @@ namespace smrobot::workbench::spray::rotationbody
             throw std::runtime_error("Unknown boundary mode.");
         }
 
+        const char* regionLabelName(domain::RegionLabel value)
+        {
+            switch(value) {
+            case domain::RegionLabel::Unclassified: return "unclassified";
+            case domain::RegionLabel::ToothTop: return "toothTop";
+            case domain::RegionLabel::ToothWall: return "toothWall";
+            case domain::RegionLabel::ToothBottom: return "toothBottom";
+            case domain::RegionLabel::Transition: return "transition";
+            }
+            return "unclassified";
+        }
+
+        domain::RegionLabel regionLabel(const std::string& value)
+        {
+            if(value == "unclassified") return domain::RegionLabel::Unclassified;
+            if(value == "toothTop") return domain::RegionLabel::ToothTop;
+            if(value == "toothWall") return domain::RegionLabel::ToothWall;
+            if(value == "toothBottom") return domain::RegionLabel::ToothBottom;
+            if(value == "transition") return domain::RegionLabel::Transition;
+            throw std::runtime_error("Unknown region label.");
+        }
+
+        Json sectionJson(const domain::SectionContour& section)
+        {
+            Json pointsYz = Json::array();
+            for(const Eigen::Vector2d& point : section.pointsYz) {
+                pointsYz.push_back(vector2Json(point));
+            }
+            Json points3d = Json::array();
+            for(const Eigen::Vector3d& point : section.points3d) {
+                points3d.push_back(vector3Json(point));
+            }
+            return {
+                { "pointsYz", std::move(pointsYz) },
+                { "points3d", std::move(points3d) },
+                { "cumulativeArcLength", section.cumulativeArcLength },
+                { "closed", section.closed },
+                { "toleranceMeters", section.toleranceMeters },
+                { "diagnostics", section.diagnostics }
+            };
+        }
+
+        domain::SectionContour section(const Json& value)
+        {
+            domain::SectionContour result;
+            for(const Json& point : value.at("pointsYz")) {
+                result.pointsYz.push_back(vector2(point));
+            }
+            for(const Json& point : value.at("points3d")) {
+                result.points3d.push_back(vector3(point));
+            }
+            result.cumulativeArcLength = value.at("cumulativeArcLength")
+                .get<std::vector<double>>();
+            result.closed = value.at("closed").get<bool>();
+            result.toleranceMeters = value.at("toleranceMeters").get<double>();
+            result.diagnostics = value.value("diagnostics", std::vector<std::string>{});
+            if(result.pointsYz.size() < 2 || result.points3d.size() != result.pointsYz.size()) {
+                throw std::runtime_error("Stored section contour dimensions are invalid.");
+            }
+            return result;
+        }
+
+        Json regionsJson(const domain::RegionAssignment& regions)
+        {
+            Json labels = Json::array();
+            for(const domain::RegionLabel label : regions.segmentLabels) {
+                labels.push_back(regionLabelName(label));
+            }
+            return {
+                { "labels", std::move(labels) },
+                { "confidence", regions.segmentConfidence },
+                { "diagnostics", regions.diagnostics }
+            };
+        }
+
+        domain::RegionAssignment regions(const Json& value)
+        {
+            domain::RegionAssignment result;
+            for(const Json& label : value.at("labels")) {
+                result.segmentLabels.push_back(regionLabel(label.get<std::string>()));
+            }
+            result.segmentConfidence = value.value(
+                "confidence", std::vector<double>{});
+            result.diagnostics = value.value("diagnostics", std::vector<std::string>{});
+            if(!result.segmentConfidence.empty() &&
+                result.segmentLabels.size() != result.segmentConfidence.size()) {
+                throw std::runtime_error("Stored region dimensions are invalid.");
+            }
+            return result;
+        }
+
         Json boundaryJson(const domain::SprayBoundary& boundary)
         {
             Json polygon = Json::array();
@@ -251,12 +342,16 @@ namespace smrobot::workbench::spray::rotationbody
                     { "trajectory", trajectoryJson(pass.trajectory) }
                 });
             }
-            return { { "passes", std::move(passes) } };
+            return { { "passes", std::move(passes) }, { "cycleCount", group.cycleCount } };
         }
 
         domain::TrajectoryGroup group(const Json& value)
         {
             domain::TrajectoryGroup result;
+            result.cycleCount = value.value("cycleCount", std::size_t{ 1 });
+            if(result.cycleCount < 1 || result.cycleCount > 100) {
+                throw std::runtime_error("Trajectory group cycle count must be between 1 and 100.");
+            }
             for(const Json& item : value.at("passes")) {
                 domain::TrajectoryPass pass;
                 pass.id = item.at("id").get<std::string>();
@@ -368,13 +463,14 @@ namespace smrobot::workbench::spray::rotationbody
         bool upsert(
             simulation_project::ProjectDocument& document,
             const char* key,
+            int version,
             std::string payload)
         {
             std::size_t matchingCount = 0;
             for(const simulation_project::ProjectExtensionDesc& extension : document.extensions) {
                 if(extension.key == key) {
                     ++matchingCount;
-                    if(extension.version > RotationBodyTrajectoryProjectStore::currentVersion) {
+                    if(extension.version > version) {
                         throw std::runtime_error(
                             "A newer rotation-body trajectory extension cannot be overwritten.");
                     }
@@ -383,7 +479,7 @@ namespace smrobot::workbench::spray::rotationbody
             if(matchingCount == 0) {
                 document.extensions.push_back({
                     key,
-                    RotationBodyTrajectoryProjectStore::currentVersion,
+                    version,
                     std::move(payload)
                 });
                 return true;
@@ -403,9 +499,9 @@ namespace smrobot::workbench::spray::rotationbody
                 }
                 kept = true;
                 simulation_project::ProjectExtensionDesc updated = extension;
-                if(updated.version != RotationBodyTrajectoryProjectStore::currentVersion ||
+                if(updated.version != version ||
                     updated.serializedPayload != payload) {
-                    updated.version = RotationBodyTrajectoryProjectStore::currentVersion;
+                    updated.version = version;
                     updated.serializedPayload = payload;
                     changed = true;
                 }
@@ -457,7 +553,7 @@ namespace smrobot::workbench::spray::rotationbody
         const RotationBodyTrajectoryDraft& draft)
     {
         RotationBodyTrajectoryDraft versioned = draft;
-        versioned.schemaVersion = currentVersion;
+        versioned.schemaVersion = workspaceVersion;
         Json root = {
             { "schemaVersion", versioned.schemaVersion },
             { "objectId", versioned.objectId },
@@ -467,7 +563,7 @@ namespace smrobot::workbench::spray::rotationbody
             { "rapidSettings", rapidSettingsJson(versioned.rapidSettings) },
             { "rapidSequence", sequenceJson(versioned.rapidSequence) }
         };
-        return upsert(document, workspaceExtensionKey, root.dump());
+        return upsert(document, workspaceExtensionKey, workspaceVersion, root.dump());
     }
 
     TrajectoryWorkspaceReadResult RotationBodyTrajectoryProjectStore::readWorkspace(
@@ -486,7 +582,7 @@ namespace smrobot::workbench::spray::rotationbody
         if(extension == nullptr) {
             return {};
         }
-        if(extension->version != currentVersion) {
+        if(extension->version != workspaceVersion) {
             return {
                 TrajectoryProjectReadStatus::UnsupportedVersion,
                 std::nullopt,
@@ -495,7 +591,7 @@ namespace smrobot::workbench::spray::rotationbody
         }
         try {
             const Json root = Json::parse(extension->serializedPayload);
-            if(root.at("schemaVersion").get<int>() != currentVersion) {
+            if(root.at("schemaVersion").get<int>() != workspaceVersion) {
                 return {
                     TrajectoryProjectReadStatus::UnsupportedVersion,
                     std::nullopt,
@@ -503,7 +599,7 @@ namespace smrobot::workbench::spray::rotationbody
                 };
             }
             RotationBodyTrajectoryDraft draft;
-            draft.schemaVersion = currentVersion;
+            draft.schemaVersion = workspaceVersion;
             draft.objectId = root.at("objectId").get<std::string>();
             draft.sourceFingerprint = root.at("sourceFingerprint").get<std::string>();
             draft.meshFingerprint = root.at("meshFingerprint").get<std::uint64_t>();
@@ -540,12 +636,23 @@ namespace smrobot::workbench::spray::rotationbody
             { "schemaVersion", versioned.schemaVersion },
             { "objectId", versioned.objectId },
             { "baseFromPlanning", transformJson(versioned.baseFromPlanning) },
+            { "planningFromMesh", transformJson(versioned.planningFromMesh) },
             { "group", groupJson(versioned.group) },
             { "safetyPositionBaseMeters", vector3Json(versioned.safetyPositionBaseMeters) },
             { "safetySpeedMetersPerSecond", versioned.safetySpeedMetersPerSecond },
             { "executionSequence", sequenceJson(versioned.executionSequence) }
         };
-        return upsert(document, publishedExtensionKey, root.dump());
+        if(versioned.section) {
+            root["section"] = sectionJson(*versioned.section);
+        }
+        if(versioned.regions) {
+            if(!versioned.section || !versioned.regions->matches(*versioned.section)) {
+                throw std::runtime_error(
+                    "Published trajectory region data does not match its section contour.");
+            }
+            root["regions"] = regionsJson(*versioned.regions);
+        }
+        return upsert(document, publishedExtensionKey, currentVersion, root.dump());
     }
 
     PublishedTrajectoryReadResult RotationBodyTrajectoryProjectStore::readPublishedPlan(
@@ -564,7 +671,9 @@ namespace smrobot::workbench::spray::rotationbody
         if(extension == nullptr) {
             return {};
         }
-        if(extension->version != currentVersion) {
+        if(extension->version <
+                smrobot::spray::rotationbody::kPublishedTrajectoryPlanMinimumSchemaVersion ||
+            extension->version > currentVersion) {
             return {
                 TrajectoryProjectReadStatus::UnsupportedVersion,
                 std::nullopt,
@@ -573,7 +682,11 @@ namespace smrobot::workbench::spray::rotationbody
         }
         try {
             const Json root = Json::parse(extension->serializedPayload);
-            if(root.at("schemaVersion").get<int>() != currentVersion) {
+            const int schemaVersion = root.at("schemaVersion").get<int>();
+            if(schemaVersion != extension->version ||
+                schemaVersion <
+                    smrobot::spray::rotationbody::kPublishedTrajectoryPlanMinimumSchemaVersion ||
+                schemaVersion > currentVersion) {
                 return {
                     TrajectoryProjectReadStatus::UnsupportedVersion,
                     std::nullopt,
@@ -581,9 +694,22 @@ namespace smrobot::workbench::spray::rotationbody
                 };
             }
             domain::PublishedTrajectoryPlan plan;
-            plan.schemaVersion = currentVersion;
+            plan.schemaVersion = schemaVersion;
             plan.objectId = root.at("objectId").get<std::string>();
             plan.baseFromPlanning = transform(root.at("baseFromPlanning"));
+            if(root.contains("planningFromMesh")) {
+                plan.planningFromMesh = transform(root.at("planningFromMesh"));
+            }
+            if(root.contains("section")) {
+                plan.section = section(root.at("section"));
+            }
+            if(root.contains("regions")) {
+                plan.regions = regions(root.at("regions"));
+                if(!plan.section || !plan.regions->matches(*plan.section)) {
+                    throw std::runtime_error(
+                        "Published trajectory regions do not match the section contour.");
+                }
+            }
             plan.group = group(root.at("group"));
             if(root.contains("safetyPositionBaseMeters")) {
                 plan.safetyPositionBaseMeters = vector3(root.at("safetyPositionBaseMeters"));

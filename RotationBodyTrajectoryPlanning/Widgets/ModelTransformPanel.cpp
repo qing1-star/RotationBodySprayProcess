@@ -7,6 +7,7 @@
 #include <RotationBodyTrajectoryPlanning/Core/TransformUtils.h>
 
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -109,6 +110,11 @@ namespace smrobot::workbench::spray::rotationbody
         m_objectTypeGroup->addButton(m_simulationBlockButton, 1);
         objectTypeRow->addWidget(m_simulationBlockButton, 1);
 
+        m_automaticAlignmentCheckBox = new QCheckBox(m_objectGroup);
+        m_automaticAlignmentCheckBox->setObjectName(
+            QStringLiteral("rotationBodyModel.automaticAlignment"));
+        m_automaticAlignmentCheckBox->setChecked(true);
+
         m_simulationControls = new QWidget(m_objectGroup);
         auto* simulationForm = new QFormLayout(m_simulationControls);
         simulationForm->setContentsMargins(0, 0, 0, 0);
@@ -160,6 +166,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_importButton->setMinimumHeight(34);
         objectTypeRow->addWidget(m_importButton, 1);
         objectLayout->insertLayout(0, objectTypeRow);
+        objectLayout->addWidget(m_automaticAlignmentCheckBox);
         m_sourceLabel = new QLabel(m_objectGroup);
         m_sourceLabel->setObjectName(QStringLiteral("rotationBodyModel.source"));
         m_sourceLabel->setWordWrap(true);
@@ -275,24 +282,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_publishGroup = new QGroupBox(this);
         auto* publishLayout = new QVBoxLayout(m_publishGroup);
         publishLayout->setContentsMargins(8, 20, 8, 8);
-        publishLayout->setSpacing(8);
-        auto* publishRow = new QHBoxLayout();
-        publishRow->setContentsMargins(0, 0, 0, 0);
-        publishRow->setSpacing(4);
-        m_publishButtonGroup = new QButtonGroup(this);
-        m_publishButtonGroup->setExclusive(true);
-        m_publishBaseButton = new QToolButton(m_publishGroup);
-        m_publishBaseButton->setObjectName(QStringLiteral("rotationBodyModel.publishBase"));
-        configureToolSegment(m_publishBaseButton);
-        m_publishBaseButton->setChecked(true);
-        m_publishButtonGroup->addButton(m_publishBaseButton, 0);
-        publishRow->addWidget(m_publishBaseButton);
-        m_publishLocalButton = new QToolButton(m_publishGroup);
-        m_publishLocalButton->setObjectName(QStringLiteral("rotationBodyModel.publishLocal"));
-        configureToolSegment(m_publishLocalButton);
-        m_publishButtonGroup->addButton(m_publishLocalButton, 1);
-        publishRow->addWidget(m_publishLocalButton);
-        publishLayout->addLayout(publishRow);
+        publishLayout->setSpacing(6);
         m_confirmFrameButton = new QPushButton(m_publishGroup);
         m_confirmFrameButton->setObjectName(QStringLiteral("rotationBodyModel.confirmFrame"));
         m_confirmFrameButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
@@ -300,6 +290,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_confirmFrameButton->setMinimumHeight(34);
         publishLayout->addWidget(m_confirmFrameButton);
         layout->addWidget(m_publishGroup);
+
         layout->addStretch(1);
 
         connect(
@@ -326,16 +317,6 @@ namespace smrobot::workbench::spray::rotationbody
         connect(m_importButton, &QToolButton::clicked, this, &ModelTransformPanel::chooseAndRequestImport);
         connect(m_flipButton, &QToolButton::clicked, this, &ModelTransformPanel::flipRequested);
         connect(m_resetButton, &QToolButton::clicked, this, &ModelTransformPanel::resetRequested);
-        connect(
-            m_publishButtonGroup,
-            static_cast<void(QButtonGroup::*)(int)>(&QButtonGroup::buttonClicked),
-            this,
-            [this](int id) {
-                if(!m_updating) {
-                    emit publishFrameChanged(
-                        id == 1 ? PublishFrame::PlanningLocalFrame : PublishFrame::BaseFrame);
-                }
-            });
         connect(m_confirmFrameButton, &QPushButton::clicked, this, &ModelTransformPanel::confirmFrameRequested);
         connectTransformFields(m_adjustmentFields, true);
         connectTransformFields(m_baseFrameFields, false);
@@ -457,13 +438,6 @@ namespace smrobot::workbench::spray::rotationbody
                     domain::metersToMillimeters(viewModel.motherMaximumDiameterMeters));
             }
         }
-        {
-            const QSignalBlocker baseBlocker(m_publishBaseButton);
-            const QSignalBlocker localBlocker(m_publishLocalButton);
-            m_publishBaseButton->setChecked(viewModel.publishFrame == PublishFrame::BaseFrame);
-            m_publishLocalButton->setChecked(
-                viewModel.publishFrame == PublishFrame::PlanningLocalFrame);
-        }
         setTransformComponents(m_adjustmentFields, viewModel.planningDelta);
         setTransformComponents(m_baseFrameFields, viewModel.baseFromPlanning);
         m_updating = false;
@@ -494,6 +468,7 @@ namespace smrobot::workbench::spray::rotationbody
         options.objectType = m_simulationBlockButton->isChecked()
             ? domain::PlanningObjectType::SimulationBlock
             : domain::PlanningObjectType::CompletePart;
+        options.automaticAlignment = m_automaticAlignmentCheckBox->isChecked();
         options.originalRotationAxis = comboAxis(m_rotationAxisCombo);
         options.toothOutwardAxis = comboAxis(m_toothAxisCombo);
         options.motherMaximumDiameterMeters =
@@ -539,6 +514,7 @@ namespace smrobot::workbench::spray::rotationbody
     {
         const bool simulation = m_simulationBlockButton->isChecked();
         m_simulationControls->setVisible(simulation);
+        m_automaticAlignmentCheckBox->setVisible(!simulation);
         const bool valid = importConfigurationValid();
         m_axisValidationLabel->setText(
             RotationBodyPlanningTranslations::text(
@@ -648,6 +624,9 @@ namespace smrobot::workbench::spray::rotationbody
         m_objectGroup->setTitle(translated("model.planning_object"));
         m_completePartButton->setText(translated("model.complete_part"));
         m_simulationBlockButton->setText(translated("model.simulation_block"));
+        m_automaticAlignmentCheckBox->setText(translated("model.automatic_alignment"));
+        m_automaticAlignmentCheckBox->setToolTip(
+            translated("model.automatic_alignment_tooltip"));
         m_diameterLabel->setText(translated("simulation.maximum_diameter"));
         m_rotationAxisLabel->setText(translated("simulation.rotation_axis"));
         m_toothAxisLabel->setText(translated("simulation.tooth_outward"));
@@ -687,9 +666,7 @@ namespace smrobot::workbench::spray::rotationbody
             m_adjustmentLabels[index]->setText(label);
             m_baseFrameLabels[index]->setText(label);
         }
-        m_publishGroup->setTitle(translated("publish.title"));
-        m_publishBaseButton->setText(translated("publish.base"));
-        m_publishLocalButton->setText(translated("publish.local"));
+        m_publishGroup->setTitle(translated("frame.confirmation_title"));
         m_confirmFrameButton->setText(translated("publish.confirm_frame"));
         m_confirmFrameButton->setToolTip(translated("publish.confirm_frame_tooltip"));
     }

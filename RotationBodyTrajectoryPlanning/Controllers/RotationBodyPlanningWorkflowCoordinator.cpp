@@ -225,7 +225,9 @@ namespace smrobot::workbench::spray::rotationbody
                 ? RotationBodyPlanningTranslations::text(
                     m_languageCode,
                     successTranslationKey)
-                : localizedCurrentStatus();
+                : (result.message.isEmpty()
+                    ? localizedCurrentStatus()
+                    : result.message);
         } else {
             message = RotationBodyPlanningTranslations::errorText(
                 m_languageCode,
@@ -322,14 +324,6 @@ namespace smrobot::workbench::spray::rotationbody
         connect(&m_leftPanel, &RotationBodyPlanningLeftPanel::resetRequested, this, [this]() {
             reportResult(m_controller.resetModelTransform(), "status.alignment_reset");
         });
-        connect(
-            &m_leftPanel,
-            &RotationBodyPlanningLeftPanel::publishFrameChanged,
-            this,
-            [this](PublishFrame frame) {
-                m_controller.setPublishFrame(frame);
-                refresh();
-            });
         connect(&m_leftPanel, &RotationBodyPlanningLeftPanel::confirmFrameRequested, this, [this]() {
             reportResult(m_controller.confirmFrame());
         });
@@ -437,6 +431,21 @@ namespace smrobot::workbench::spray::rotationbody
             });
         connect(
             &m_rightPanel,
+            &RotationBodyPlanningRightPanel::automaticTrajectoriesRequested,
+            this,
+            [this](int trajectoryCount) {
+                reportResult(m_controller.appendAutomaticTrajectories(trajectoryCount));
+            });
+        connect(
+            &m_rightPanel,
+            &RotationBodyPlanningRightPanel::importTrajectoryParametersRequested,
+            this,
+            [this](const QString& sourcePath) {
+                reportResult(m_controller.importTrajectoryParameterTextFile(
+                    std::filesystem::path(sourcePath.toStdWString())));
+            });
+        connect(
+            &m_rightPanel,
             &RotationBodyPlanningRightPanel::trajectorySwapDirectionRequested,
             this,
             [this]() {
@@ -490,6 +499,11 @@ namespace smrobot::workbench::spray::rotationbody
             [this]() { reportResult(m_controller.saveCurrentTrajectoryToGroup()); });
         connect(
             &m_rightPanel,
+            &RotationBodyPlanningRightPanel::exportTrajectoryGroupRequested,
+            this,
+            [this]() { reportResult(m_controller.exportTrajectoryGroupTextFile()); });
+        connect(
+            &m_rightPanel,
             &RotationBodyPlanningRightPanel::removeTrajectoryRequested,
             this,
             [this](const std::string& passId) {
@@ -511,69 +525,11 @@ namespace smrobot::workbench::spray::rotationbody
             [this](const std::string& passId, double seconds) {
                 reportResult(m_controller.setTrajectoryTransitionAfter(passId, seconds));
             });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::rapidSettingsEdited,
+        connect(&m_rightPanel,
+            &RotationBodyPlanningRightPanel::trajectoryCycleCountChanged,
             this,
-            [this](const domain::RapidExportSettings& settings) {
-                const RotationBodyControllerResult result =
-                    m_controller.updateRapidSettings(settings);
-                if(!result.success) reportResult(result);
-            });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::rapidSequenceEdited,
-            this,
-            [this](const std::vector<domain::RapidSequenceEntry>& sequence) {
-                const RotationBodyControllerResult result =
-                    m_controller.updateRapidSequence(sequence);
-                if(!result.success) reportResult(result);
-            });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::rapidGenerateRequested,
-            this,
-            [this](const domain::RapidExportSettings& settings,
-                const std::vector<domain::RapidSequenceEntry>& sequence) {
-                RotationBodyControllerResult result =
-                    m_controller.updateRapidSettings(settings);
-                if(result.success) {
-                    result = m_controller.updateRapidSequence(sequence);
-                }
-                if(result.success) {
-                    result = m_controller.generateAndSaveRapidModule();
-                }
-                reportResult(result);
-            });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::rapidPreviewStepSelected,
-            this,
-            [this](int index) {
-                m_controller.setSelectedRapidPreviewStep(
-                    index >= 0
-                    ? std::optional<std::size_t>(
-                        static_cast<std::size_t>(index))
-                    : std::nullopt);
-            });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::calibrationWorkspaceEdited,
-            this,
-            [this](const WorkpieceCalibrationWorkspace& workspace) {
-                const RotationBodyControllerResult result =
-                    m_controller.updateCalibrationWorkspace(workspace);
-                if(!result.success) reportResult(result);
-            });
-        connect(
-            &m_rightPanel,
-            &RotationBodyPlanningRightPanel::calibrationBaseTransformCalculated,
-            this,
-            [this](const domain::TransformComponents& components) {
-                reportResult(
-                    m_controller.updateBaseComponents(components),
-                    "status.calibration_applied",
-                    3500);
+            [this](int count) {
+                reportResult(m_controller.setTrajectoryCycleCount(count));
             });
     }
 }

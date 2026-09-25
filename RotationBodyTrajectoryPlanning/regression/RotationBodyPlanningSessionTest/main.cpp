@@ -13,7 +13,6 @@
 #include "Widgets/RotationBodyWorkflowNavigation.h"
 #include "Widgets/SectionRegionPanel.h"
 #include "Widgets/SectionView.h"
-#include "Widgets/WorkpieceCalibrationPanel.h"
 
 #include <AssetCore/ModelDesc.h>
 #include <SimulationProject/ProjectDocument.h>
@@ -22,6 +21,7 @@
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerEventHub.h"
+#include "RobotQtViewerOperationStatus.h"
 #include "RobotQtViewerSelectionModel.h"
 #include "RobotQtViewerViewportPreviewState.h"
 
@@ -32,6 +32,7 @@
 #include <glm/glm.hpp>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -87,6 +88,7 @@ namespace
         robot_qt_viewer::RobotQtViewerDocumentController documentController;
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel;
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState;
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore;
         robot_qt_viewer::RobotQtViewerDocumentContext context;
         FakeRotationBodyViewportServices viewport;
         app::RotationBodyPlanningController controller;
@@ -95,12 +97,14 @@ namespace
             : documentController(projectSession, eventHub)
             , selectionModel(eventHub)
             , previewState(eventHub)
+            , operationStatusStore(eventHub)
             , context(
                 projectSession,
                 documentController,
                 selectionModel,
                 previewState,
-                eventHub)
+                eventHub,
+                operationStatusStore)
             , controller(context)
         {
             context.setViewportServices(&viewport);
@@ -521,6 +525,17 @@ namespace
             return;
         }
 
+        expect(session.setTrajectoryCycleCount(3).ok() &&
+            session.trajectoryWorkspace().group.cycleCount == 3 &&
+            session.makePublishedTrajectoryPlan().group.cycleCount == 3,
+            "planning session publishes the selected trajectory group cycle count");
+        expect(!session.setTrajectoryCycleCount(0).ok(),
+            "planning session rejects a zero trajectory group cycle count");
+        expect(session.setTrajectoryTransitionAfter(saved.value, 6.0).ok() &&
+            session.makePublishedTrajectoryPlan().group.passes.back()
+                .transitionAfterSeconds == 6.0,
+            "planning session preserves the interval from one group cycle to the next");
+
         domain::RapidExportSettings rapidSettings;
         rapidSettings.safetyPositionBaseMeters = { 0.5, 0.6, 0.7 };
         rapidSettings.outputDirectory = "data/ABBrapid";
@@ -547,7 +562,9 @@ namespace
         const app::PublishedTrajectoryReadResult publishedRead =
             app::RotationBodyTrajectoryProjectStore::readPublishedPlan(document);
         expect(workspaceRead.usable() && workspaceRead.draft.has_value() &&
-            publishedRead.usable() && publishedRead.plan.has_value(),
+            publishedRead.usable() && publishedRead.plan.has_value() &&
+            workspaceRead.draft->workspace.group.cycleCount == 3 &&
+            publishedRead.plan->group.cycleCount == 3,
             "both trajectory extensions round-trip as structured versioned data");
 
         app::RotationBodyPlanningSession restored = populatedSession();
@@ -555,6 +572,7 @@ namespace
             restored.restoreTrajectoryDraft(*workspaceRead.draft).ok(),
             "matching workpiece identity restores private trajectory progress");
         expect(restored.trajectoryWorkspace().group.passes.size() == 1 &&
+            restored.trajectoryWorkspace().group.cycleCount == 3 &&
             restored.rapidSequence().size() == 2 &&
             !restored.trajectoryWorkspace().currentTrajectory.has_value(),
             "trajectory group and ABB sequence survive restoration without a stale current draft");
@@ -586,6 +604,42 @@ namespace
             restored.trajectoryWorkspace().group.passes.empty() &&
             restored.rapidSequence().empty(),
             "changing the planning transform clears all dependent trajectories and ABB references");
+    }
+
+    void testBatchTrajectoryAppendIsAtomic()
+    {
+        app::RotationBodyPlanningSession session = populatedSession();
+        domain::TrajectoryGenerationParameters first;
+        first.sprayDistanceMeters = 0.110;
+        first.tiltRadians = 0.3;
+        first.speedMetersPerSecond = 0.004;
+        first.startExtensionMeters = 0.015;
+        first.endExtensionMeters = 0.015;
+        first.positionerRpm = 65.0;
+        domain::TrajectoryGenerationParameters second = first;
+        second.tiltRadians = -0.3;
+
+        const auto appended = session.appendGeneratedTrajectories({ first, second });
+        expect(appended.ok() && appended.value.size() == 2 &&
+                session.trajectoryWorkspace().group.passes.size() == 2,
+            "batch trajectory generation appends every requested pass");
+        if(appended && appended.value.size() == 2) {
+            expect(appended.value[0] == "trajectory-1" &&
+                    appended.value[1] == "trajectory-2" &&
+                    std::abs(session.trajectoryWorkspace().group.passes[0]
+                        .trajectory.parameters.tiltRadians - 0.3) < 1.0e-12 &&
+                    std::abs(session.trajectoryWorkspace().group.passes[1]
+                        .trajectory.parameters.tiltRadians + 0.3) < 1.0e-12,
+                "batch append preserves trajectory order and parameter values");
+        }
+
+        const std::size_t beforeFailure =
+            session.trajectoryWorkspace().group.passes.size();
+        domain::TrajectoryGenerationParameters invalid = first;
+        invalid.speedMetersPerSecond = 0.0;
+        expect(!session.appendGeneratedTrajectories({ first, invalid }).ok() &&
+                session.trajectoryWorkspace().group.passes.size() == beforeFailure,
+            "a failed batch leaves the existing trajectory group unchanged");
     }
 
     void testDraftRoundTripAndDegradation()
@@ -1391,6 +1445,43 @@ namespace
         {
             ControllerFixture fixture;
             fixture.projectSession.setPath(
+                sourceRoot / "RotationBodyDirectImportTest.sys.json");
+            app::RotationBodyImportOptions directOptions;
+            directOptions.automaticAlignment = false;
+            int completionCount = 0;
+            app::RotationBodyControllerResult completion;
+            QObject::connect(
+                &fixture.controller,
+                &app::RotationBodyPlanningController::asyncOperationFinished,
+                [&completionCount, &completion](
+                    const app::RotationBodyControllerResult& result) {
+                    ++completionCount;
+                    completion = result;
+                });
+            const app::RotationBodyControllerResult started =
+                fixture.controller.startImportModel(modelPath, directOptions);
+            expect(started.success && processEventsUntil([&completionCount]() {
+                return completionCount == 1;
+            }, 30000) && completion.success &&
+                fixture.controller.session().planningFromMesh().matrix().isApprox(
+                    Eigen::Matrix4d::Identity(), 1.0e-12) &&
+                fixture.controller.session().automaticBaseline().matrix().isApprox(
+                    Eigen::Matrix4d::Identity(), 1.0e-12),
+                "direct complete-part import keeps the source mesh coordinates unchanged");
+            expect(fixture.controller.saveProgressAndExit().success &&
+                fixture.projectSession.document().objects.size() == 1 &&
+                fixture.projectSession.document().objects.front().transform.x == 0.0 &&
+                fixture.projectSession.document().objects.front().transform.y == 0.0 &&
+                fixture.projectSession.document().objects.front().transform.z == 0.0 &&
+                fixture.projectSession.document().objects.front().transform.roll == 0.0 &&
+                fixture.projectSession.document().objects.front().transform.pitch == 0.0 &&
+                fixture.projectSession.document().objects.front().transform.yaw == 0.0,
+                "saving a direct import preserves the model's original scene transform");
+        }
+
+        {
+            ControllerFixture fixture;
+            fixture.projectSession.setPath(
                 sourceRoot / "RotationBodyAsyncImportFailureTest.sys.json");
             const bool initialDirty = fixture.projectSession.isDirty();
             int completionCount = 0;
@@ -1472,12 +1563,14 @@ namespace
             eventHub);
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel(eventHub);
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState(eventHub);
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore(eventHub);
         robot_qt_viewer::RobotQtViewerDocumentContext context(
             projectSession,
             documentController,
             selectionModel,
             previewState,
-            eventHub);
+            eventHub,
+            operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
         projectSession.document().objects.push_back(
@@ -1569,6 +1662,41 @@ namespace
             app::RotationBodyPlanningDraftStore::read(
                 fixture.projectSession.document()).status == app::DraftReadStatus::Loaded,
             "post-warning discard cannot roll back the already committed project");
+    }
+
+    void testSavePublishesCurrentTrajectoryParameters()
+    {
+        ControllerFixture fixture;
+        fixture.projectSession.document().objects.push_back(projectObject("workpiece_1"));
+        expect(fixture.controller.activate().success,
+            "trajectory publish fixture activates");
+
+        app::RotationBodyPlanningSession prepared = populatedSession();
+        expect(fixture.controller.session().restoreDraft(
+                   prepared.makeDraft(), tetrahedron(), "fingerprint-a").ok(),
+            "trajectory publish fixture restores planning geometry");
+        domain::TrajectoryGenerationParameters parameters;
+        parameters.sprayDistanceMeters = 0.12;
+        parameters.tiltRadians = -30.0 * 3.14159265358979323846 / 180.0;
+        parameters.speedMetersPerSecond = 0.004;
+        parameters.startExtensionMeters = 0.02;
+        parameters.endExtensionMeters = 0.02;
+        parameters.pointCount = 7;
+        parameters.positionerRpm = 65.0;
+        expect(fixture.controller.updateTrajectoryParameters(parameters).success &&
+            fixture.controller.generateCurrentTrajectory().success,
+            "trajectory publish fixture generates the edited trajectory");
+
+        expect(fixture.controller.saveProgressAndExit().success,
+            "whole-planning save commits the current trajectory");
+        const app::PublishedTrajectoryReadResult published =
+            app::RotationBodyTrajectoryProjectStore::readPublishedPlan(
+                fixture.projectSession.document());
+        expect(published.usable() && published.plan &&
+            published.plan->group.passes.size() == 1 &&
+            std::abs(published.plan->group.passes.front().trajectory.parameters.tiltRadians -
+                parameters.tiltRadians) < 1.0e-12,
+            "published trajectory parameters match the trajectory shown in planning");
     }
 
     void testCoordinatorReportsCommittedSaveWarning()
@@ -1692,12 +1820,14 @@ namespace
             eventHub);
         robot_qt_viewer::RobotQtViewerSelectionModel selectionModel(eventHub);
         robot_qt_viewer::RobotQtViewerViewportPreviewState previewState(eventHub);
+        robot_qt_viewer::RobotQtViewerOperationStatusStore operationStatusStore(eventHub);
         robot_qt_viewer::RobotQtViewerDocumentContext context(
             projectSession,
             documentController,
             selectionModel,
             previewState,
-            eventHub);
+            eventHub,
+            operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
         app::RotationBodyPlanningController controller(context);
@@ -2067,8 +2197,8 @@ namespace
         app::RotationBodyPlanningLeftPanel leftPanel;
         app::RotationBodyPlanningRightPanel rightPanel;
         expect(leftPanel.findChildren<QScrollArea*>().size() == 2 &&
-            rightPanel.findChildren<QScrollArea*>().size() == 3,
-            "each module workflow page owns an independent content scroll area");
+            rightPanel.findChildren<QScrollArea*>().size() == 1,
+            "trajectory planning keeps its own content scroll area");
         leftPanel.setLanguageCode(QStringLiteral("zh-CN"));
         rightPanel.setLanguageCode(QStringLiteral("zh-CN"));
         auto* saveButton = leftPanel.findChild<QPushButton*>(
@@ -2093,10 +2223,27 @@ namespace
             leftPanel.sectionRegionPanel() != nullptr &&
             rightPanel.hasVisibleContent() &&
             rightPanel.trajectoryPlanningPanel() != nullptr &&
-            rightPanel.abbTranslationPanel() != nullptr &&
-            rightPanel.workpieceCalibrationPanel() != nullptr &&
             rightPanel.sectionRegionPanel() == nullptr,
-            "left stack owns model and section pages while the right stack owns trajectory, ABB, and calibration pages");
+            "left stack owns model and section pages while the right stack owns trajectory planning");
+        auto* sprayDistance = rightPanel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.sprayDistance"));
+        auto* trajectoryTilt = rightPanel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.tilt"));
+        expect(sprayDistance != nullptr && trajectoryTilt != nullptr &&
+            sprayDistance->minimum() == -100.0 &&
+            sprayDistance->maximum() == 9999.0 &&
+            trajectoryTilt->minimum() == -999.0 &&
+            trajectoryTilt->maximum() == 999.0,
+            "trajectory editors expose the requested spray-distance and tilt ranges");
+        auto* autoTwo = rightPanel.findChild<QPushButton*>(
+            QStringLiteral("rotationBodyTrajectory.autoGenerateTwo"));
+        auto* autoThree = rightPanel.findChild<QPushButton*>(
+            QStringLiteral("rotationBodyTrajectory.autoGenerateThree"));
+        auto* importParameters = rightPanel.findChild<QPushButton*>(
+            QStringLiteral("rotationBodyTrajectory.importParameters"));
+        expect(autoTwo != nullptr && autoThree != nullptr &&
+                importParameters != nullptr,
+            "trajectory planning exposes two-pass, three-pass and TXT batch commands");
         expect(returnButton != nullptr &&
             returnButton->text() == app::RotationBodyPlanningTranslations::text(
                 QStringLiteral("en"), "command.return_to_workpiece") &&
@@ -2110,6 +2257,17 @@ namespace
         expect(!modelPanelLabels.contains(
             QStringLiteral("confidence"), Qt::CaseInsensitive),
             "model transform UI does not expose alignment confidence or warnings");
+        auto* automaticAlignment = leftPanel.findChild<QCheckBox*>(
+            QStringLiteral("rotationBodyModel.automaticAlignment"));
+        expect(automaticAlignment != nullptr && automaticAlignment->isChecked() &&
+            automaticAlignment->text() == app::RotationBodyPlanningTranslations::text(
+                QStringLiteral("en"), "model.automatic_alignment"),
+            "complete-part imports default to automatic alignment with a visible override");
+        if(automaticAlignment != nullptr) {
+            automaticAlignment->setChecked(false);
+            expect(!leftPanel.modelTransformPanel()->importOptions().automaticAlignment,
+                "clearing automatic alignment requests an original-coordinate import");
+        }
 
         int deltaEmissionCount = 0;
         QObject::connect(
@@ -2144,27 +2302,19 @@ namespace
             "region planning exposes exactly five selectable labels");
     }
 
+    #if 0 // Calibration UI moved to SMRobotWorkbenchCalibrationTranslation.
     void testWorkpieceCalibrationWidget()
     {
-        app::RotationBodyPlanningRightPanel rightPanel;
-        rightPanel.setViewModel(uiViewModel(domain::PlanningStage::ModelLoaded));
-        rightPanel.setCurrentRightWorkflow(
-            app::RotationBodyRightWorkflow::WorkpieceCalibration);
-        auto* stack = rightPanel.findChild<QStackedWidget*>(
-            QStringLiteral("rotationBodyRightWorkflowStack"));
-        app::WorkpieceCalibrationPanel* panel =
-            rightPanel.workpieceCalibrationPanel();
-        expect(panel != nullptr && stack != nullptr && stack->count() == 3 &&
-            rightPanel.currentRightWorkflow() ==
-                app::RotationBodyRightWorkflow::WorkpieceCalibration,
-            "right workflow exposes calibration as the page after ABB translation");
-        if(panel == nullptr) return;
+        app::WorkpieceCalibrationPanel panel;
+        panel.setViewModel(uiViewModel(domain::PlanningStage::ModelLoaded));
+        expect(panel.findChild<QTabWidget*>(QStringLiteral("rotationBodyCalibration.modes")) != nullptr,
+            "calibration module exposes cylinder and circle calibration modes");
 
-        auto* tabs = panel->findChild<QTabWidget*>(
+        auto* tabs = panel.findChild<QTabWidget*>(
             QStringLiteral("rotationBodyCalibration.modes"));
-        auto* cylinderTable = panel->findChild<QTableWidget*>(
+        auto* cylinderTable = panel.findChild<QTableWidget*>(
             QStringLiteral("rotationBodyCalibration.cylinderPoints"));
-        auto* circleTable = panel->findChild<QTableWidget*>(
+        auto* circleTable = panel.findChild<QTableWidget*>(
             QStringLiteral("rotationBodyCalibration.circlePoints"));
         expect(tabs != nullptr && cylinderTable != nullptr && circleTable != nullptr &&
             cylinderTable->rowCount() == 12 && circleTable->rowCount() == 6,
@@ -2191,16 +2341,16 @@ namespace
                     QString::number(point[static_cast<std::size_t>(column)], 'f', 3));
             }
         }
-        auto* fitButton = panel->findChild<QPushButton*>(
+        auto* fitButton = panel.findChild<QPushButton*>(
             QStringLiteral("rotationBodyCalibration.fitCurrent"));
         expect(fitButton != nullptr, "calibration exposes a current-mode fit command");
         if(fitButton == nullptr) return;
         fitButton->click();
-        expect(panel->circleFit().has_value() &&
-            std::abs(panel->circleFit()->radiusMeters - 0.1) < 1.0e-6,
+        expect(panel.circleFit().has_value() &&
+            std::abs(panel.circleFit()->radiusMeters - 0.1) < 1.0e-6,
             "calibration page converts millimeter entries and fits the six-point circle");
 
-        const auto setCoordinate = [panel](
+        const auto setCoordinate = [&panel](
             const QString& prefix,
             const std::array<double, 3>& point) {
             const std::array<QString, 3> axes{
@@ -2210,7 +2360,7 @@ namespace
             };
             for(int index = 0; index < 3; ++index)
             {
-                if(QLineEdit* field = panel->findChild<QLineEdit*>(
+                if(QLineEdit* field = panel.findChild<QLineEdit*>(
                     QStringLiteral("rotationBodyCalibration.%1.%2")
                         .arg(prefix, axes[static_cast<std::size_t>(index)]))) {
                     field->setText(QString::number(
@@ -2221,20 +2371,20 @@ namespace
         setCoordinate(QStringLiteral("top"), { 600.0, -200.0, 1300.0 });
         setCoordinate(QStringLiteral("yStart"), { 500.0, -200.0, 1100.0 });
         setCoordinate(QStringLiteral("yEnd"), { 500.0, 0.0, 1100.0 });
-        auto* height = panel->findChild<QDoubleSpinBox*>(
+        auto* height = panel.findChild<QDoubleSpinBox*>(
             QStringLiteral("rotationBodyCalibration.height"));
         if(height != nullptr) height->setValue(200.0);
 
         int emissionCount = 0;
         domain::TransformComponents emitted;
         QObject::connect(
-            &rightPanel,
-            &app::RotationBodyPlanningRightPanel::calibrationBaseTransformCalculated,
+            &panel,
+            &app::WorkpieceCalibrationPanel::baseTransformCalculated,
             [&emissionCount, &emitted](const domain::TransformComponents& components) {
                 ++emissionCount;
                 emitted = components;
             });
-        auto* calculateButton = panel->findChild<QPushButton*>(
+        auto* calculateButton = panel.findChild<QPushButton*>(
             QStringLiteral("rotationBodyCalibration.calculateApply"));
         expect(calculateButton != nullptr && calculateButton->isEnabled(),
             "a valid fit enables calculation and application of the workpiece pose");
@@ -2244,19 +2394,20 @@ namespace
             emitted.rollPitchYawRadians.isZero(1.0e-9),
             "calibration forwards X/Y/Z/Rx/Ry/Rz through the right-panel base-pose signal");
 
-        auto* poseResult = panel->findChild<QLabel*>(
+        auto* poseResult = panel.findChild<QLabel*>(
             QStringLiteral("rotationBodyCalibration.poseResult"));
         const QString englishPose = poseResult != nullptr
             ? poseResult->text()
             : QString();
-        rightPanel.setLanguageCode(QStringLiteral("zh_CN"));
+        panel.setLanguageCode(QStringLiteral("zh_CN"));
         expect(poseResult != nullptr && !englishPose.isEmpty() &&
-            poseResult->text() != englishPose && panel->frameResult().has_value(),
+            poseResult->text() != englishPose && panel.frameResult().has_value(),
             "calculated calibration result retranslates without losing its pose");
-        rightPanel.setLanguageCode(QStringLiteral("en"));
+        panel.setLanguageCode(QStringLiteral("en"));
         expect(poseResult != nullptr && poseResult->text() == englishPose,
             "calibration pose result returns to English after live language switching");
     }
+    #endif
 
     void testSixStageWidgetEnableMatrix()
     {
@@ -2274,24 +2425,29 @@ namespace
             const app::RotationBodyPlanningViewModel view = uiViewModel(stage);
             modelPanel.setViewModel(view);
             sectionPanel.setViewModel(view);
-            const bool hasModel = stage != domain::PlanningStage::NoModel;
-            const bool canConfirmFrame = stage == domain::PlanningStage::ModelLoaded;
             const bool canExtract = static_cast<int>(stage) >=
                 static_cast<int>(domain::PlanningStage::FrameConfirmed);
             const bool canRecognize = static_cast<int>(stage) >=
                 static_cast<int>(domain::PlanningStage::SectionReady);
             const bool canEdit = static_cast<int>(stage) >=
                 static_cast<int>(domain::PlanningStage::RegionsReady);
-            auto* confirmFrame = modelPanel.findChild<QPushButton*>(
-                QStringLiteral("rotationBodyModel.confirmFrame"));
             auto* extract = sectionPanel.findChild<QPushButton*>(
                 QStringLiteral("rotationBodySection.extract"));
             auto* recognize = sectionPanel.findChild<QPushButton*>(
                 QStringLiteral("rotationBodySection.recognize"));
             auto* confirmBoundary = sectionPanel.findChild<QPushButton*>(
                 QStringLiteral("rotationBodySection.confirmBoundary"));
-            expect(confirmFrame != nullptr && confirmFrame->isEnabled() == canConfirmFrame,
-                "frame confirmation follows the six-stage view model");
+            auto* confirmFrame = modelPanel.findChild<QPushButton*>(
+                QStringLiteral("rotationBodyModel.confirmFrame"));
+            expect(modelPanel.findChild<QObject*>(
+                       QStringLiteral("rotationBodyModel.calculateWorkpieceFrame")) == nullptr &&
+                    modelPanel.findChild<QObject*>(
+                       QStringLiteral("rotationBodyModel.publishBase")) == nullptr &&
+                    modelPanel.findChild<QObject*>(
+                       QStringLiteral("rotationBodyModel.publishLocal")) == nullptr &&
+                    confirmFrame != nullptr &&
+                    confirmFrame->isEnabled() == view.canConfirmFrame,
+                "only workpiece-frame confirmation remains in trajectory planning");
             expect(extract != nullptr && extract->isEnabled() == canExtract,
                 "section extraction follows the six-stage view model");
             expect(recognize != nullptr && recognize->isEnabled() == canRecognize,
@@ -2458,18 +2614,10 @@ int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     QApplication application(argc, argv);
-    if(argc > 1 && std::string(argv[1]) == "--calibration-only") {
-        testWorkpieceCalibrationWidget();
-        if(failures != 0) {
-            std::cerr << failures << " calibration widget assertion(s) failed.\n";
-            return 1;
-        }
-        std::cout << "Workpiece calibration widget regression passed.\n";
-        return 0;
-    }
     testSessionGenerationAndInvalidation();
     testSessionClearRestoresDefaults();
     testTrajectoryWorkspacePersistenceAndInvalidation();
+    testBatchTrajectoryAppendIsAtomic();
     testDraftRoundTripAndDegradation();
     testSessionDraftRestoreSourceChange();
     testMeshAdapter();
@@ -2480,9 +2628,9 @@ int main(int argc, char** argv)
     testControllerAsyncImportAndCancellation();
     testControllerDestructionDrainsPrivateWorkerPool();
     testSaveCommitSurvivesViewportReloadFailure();
+    testSavePublishesCurrentTrajectoryParameters();
     testCoordinatorReportsCommittedSaveWarning();
     testWorkflowWidgetsAndTranslations();
-    testWorkpieceCalibrationWidget();
     testSixStageWidgetEnableMatrix();
     testSectionViewRenderingAndInteraction();
     testViewportOverlays();

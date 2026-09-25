@@ -2,12 +2,12 @@
 
 #include <RotationBodyTrajectoryPlanning/Core/PlanningTypes.h>
 #include <RotationBodyTrajectoryPlanning/Core/TriangleMesh.h>
-#include <RotationBodyTrajectoryPlanning/Calibration/WorkpieceCalibration.h>
+#include <CalibrationInstructionTranslation/Calibration/WorkpieceCalibration.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/RegionEditHistory.h>
 #include <RotationBodyTrajectoryPlanning/RegionPlanning/ToothRegionRecognizer.h>
 #include <RotationBodyTrajectoryPlanning/Sectioning/YzSectionExtractor.h>
 #include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/TrajectoryTypes.h>
-#include <RotationBodyTrajectoryPlanning/ABBTranslation/RapidModuleGenerator.h>
+#include <CalibrationInstructionTranslation/ABBTranslation/RapidModuleGenerator.h>
 
 #include <Eigen/Geometry>
 
@@ -223,6 +223,8 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<void> beginNewTrajectory();
         domain::PlanningResult<void> loadTrajectoryForEditing(const std::string& passId);
         domain::PlanningResult<std::string> saveCurrentTrajectoryToGroup();
+        domain::PlanningResult<std::vector<std::string>> appendGeneratedTrajectories(
+            const std::vector<domain::TrajectoryGenerationParameters>& parameters);
         domain::PlanningResult<void> removeTrajectoryPass(const std::string& passId);
         domain::PlanningResult<void> setTrajectoryPassVisible(
             const std::string& passId,
@@ -230,6 +232,7 @@ namespace smrobot::workbench::spray::rotationbody
         domain::PlanningResult<void> setTrajectoryTransitionAfter(
             const std::string& passId,
             double seconds);
+        domain::PlanningResult<void> setTrajectoryCycleCount(int count);
 
         const domain::RapidExportSettings& rapidSettings() const noexcept;
         const std::vector<domain::RapidSequenceEntry>& rapidSequence() const noexcept;

@@ -23,8 +23,6 @@ set(SOURCES
     Persistence/RotationBodyTrajectoryProjectStore.h
     Widgets/ModelTransformPanel.cpp
     Widgets/ModelTransformPanel.h
-    Widgets/ABBTranslationPanel.cpp
-    Widgets/ABBTranslationPanel.h
     Widgets/RotationBodyPlanningLeftPanel.cpp
     Widgets/RotationBodyPlanningLeftPanel.h
     Widgets/RotationBodyPlanningRightPanel.cpp
@@ -37,8 +35,6 @@ set(SOURCES
     Widgets/SectionView.h
     Widgets/TrajectoryPlanningPanel.cpp
     Widgets/TrajectoryPlanningPanel.h
-    Widgets/WorkpieceCalibrationPanel.cpp
-    Widgets/WorkpieceCalibrationPanel.h
 )
 
 add_library(${TARGET_NAME} STATIC ${SOURCES})
@@ -55,9 +51,13 @@ target_link_libraries(${TARGET_NAME}
         SMRobotWorkbenchCommon::WorkbenchCommon
         SMRobotPlatform::AssetCore
         SMRobotPlatform::SimulationProject
+        SMRobotSpray::CalibrationInstructionTranslation
         SMRobotSpray::RotationBodyTrajectoryPlanning
         Qt5::Widgets
     PRIVATE
+        SMRobotApps::RobotViewerCore
+        SMRobotMotionPlanning::MotionPlanningIk
+        SMRobotMotionPlanning::PostModel
         nlohmann_json::nlohmann_json
 )
 
@@ -68,7 +68,7 @@ if(MSVC)
 endif()
 
 set_target_properties(${TARGET_NAME} PROPERTIES
-    FOLDER SMRobotWorkbenchSprayProcess/SprayProcessWorkbench
+    FOLDER SMRobotWorkbenchSprayProcess
     AUTOMOC ON
     DEBUG_POSTFIX ${CMAKE_DEBUG_POSTFIX}
     RELEASE_POSTFIX ${CMAKE_RELEASE_POSTFIX}
@@ -88,7 +88,11 @@ if(ExportPacakge${PACKAGE_NAME})
         SMRobotWorkbenchCommon::WorkbenchCommon
         SMRobotPlatform::AssetCore
         SMRobotPlatform::SimulationProject
+        SMRobotSpray::CalibrationInstructionTranslation
         SMRobotSpray::RotationBodyTrajectoryPlanning
+        SMRobotApps::RobotViewerCore
+        SMRobotMotionPlanning::MotionPlanningIk
+        SMRobotMotionPlanning::PostModel
         Qt5::Widgets
         nlohmann_json::nlohmann_json
     )
