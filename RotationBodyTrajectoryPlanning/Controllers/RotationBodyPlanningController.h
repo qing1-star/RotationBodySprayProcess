@@ -114,6 +114,10 @@ namespace smrobot::workbench::spray::rotationbody
             const std::string& passId,
             double seconds);
         RotationBodyControllerResult setTrajectoryCycleCount(int count);
+        RotationBodyControllerResult setTrajectorySafetyTransitions(
+            bool automatic,
+            const Eigen::Vector3d& safetyPositionPlanningMeters,
+            double safetySpeedMetersPerSecond);
         RotationBodyControllerResult updateRapidSettings(
             const domain::RapidExportSettings& settings);
         RotationBodyControllerResult updateRapidSequence(
@@ -181,7 +185,9 @@ namespace smrobot::workbench::spray::rotationbody
             std::uint64_t token,
             std::uint64_t inputGeneration,
             domain::PlanningResult<domain::RegionAssignment> result);
-        void previewAndFocus();
+        domain::PlanningResult<Eigen::Isometry3d> displayFromBase() const;
+        domain::PlanningResult<Eigen::Isometry3d> publishedWorldMeshTransform() const;
+        RotationBodyControllerResult previewAndFocus();
         void clearPreviewAndFocus();
         void clearEntrySnapshot();
         void clearRapidPreview();

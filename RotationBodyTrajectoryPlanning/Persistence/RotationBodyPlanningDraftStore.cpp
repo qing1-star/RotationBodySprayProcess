@@ -550,6 +550,7 @@ namespace smrobot::workbench::spray::rotationbody
                 { "yDirectionStart", calibrationRowJson(workspace.yDirectionStart) },
                 { "yDirectionEnd", calibrationRowJson(workspace.yDirectionEnd) },
                 { "workpieceHeightMeters", workspace.workpieceHeightMeters },
+                { "topProbeBallRadiusMeters", workspace.topProbeBallRadiusMeters },
                 { "activeMode", calibrationModeName(workspace.activeMode) },
                 { "axisSource", calibrationModeName(workspace.axisSource) },
                 { "showCylinder", workspace.showCylinder },
@@ -576,6 +577,7 @@ namespace smrobot::workbench::spray::rotationbody
             result.yDirectionStart = calibrationRow(value.at("yDirectionStart"));
             result.yDirectionEnd = calibrationRow(value.at("yDirectionEnd"));
             result.workpieceHeightMeters = value.at("workpieceHeightMeters").get<double>();
+            result.topProbeBallRadiusMeters = value.value("topProbeBallRadiusMeters", 0.0);
             result.activeMode = calibrationMode(value.at("activeMode").get<std::string>());
             result.axisSource = calibrationMode(value.at("axisSource").get<std::string>());
             result.showCylinder = value.at("showCylinder").get<bool>();

@@ -75,10 +75,10 @@ set_target_properties(${TARGET_NAME} PROPERTIES
 )
 
 if(BuildTests)
-    add_subdirectory(
+    rs2026_add_test_unit(
         regression/RotationBodyPlanningSessionTest
         ${PROJECT_BINARY_DIR}/tests/rotation_body_planning_editor)
-    add_subdirectory(
+    rs2026_add_test_unit(
         regression/RotationBodyRealModelSmokeTest
         ${PROJECT_BINARY_DIR}/tests/rotation_body_real_model_smoke)
 endif()

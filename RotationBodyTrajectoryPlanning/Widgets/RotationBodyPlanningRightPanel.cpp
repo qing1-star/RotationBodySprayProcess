@@ -68,6 +68,8 @@ namespace smrobot::workbench::spray::rotationbody
             this, &RotationBodyPlanningRightPanel::trajectoryVisibilityChanged);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::trajectoryTransitionChanged,
             this, &RotationBodyPlanningRightPanel::trajectoryTransitionChanged);
+        connect(m_trajectoryPanel, &TrajectoryPlanningPanel::trajectorySafetyTransitionsChanged,
+            this, &RotationBodyPlanningRightPanel::trajectorySafetyTransitionsChanged);
         connect(m_trajectoryPanel, &TrajectoryPlanningPanel::trajectoryCycleCountChanged,
             this, &RotationBodyPlanningRightPanel::trajectoryCycleCountChanged);
         retranslate();

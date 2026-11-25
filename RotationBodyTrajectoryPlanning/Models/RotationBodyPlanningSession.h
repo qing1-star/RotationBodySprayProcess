@@ -66,6 +66,7 @@ namespace smrobot::workbench::spray::rotationbody
         CalibrationCoordinateRow yDirectionStart;
         CalibrationCoordinateRow yDirectionEnd;
         double workpieceHeightMeters{ 0.12 };
+        double topProbeBallRadiusMeters{ 0.0 };
         domain::CalibrationMode activeMode{ domain::CalibrationMode::Cylinder3d };
         domain::CalibrationMode axisSource{ domain::CalibrationMode::Cylinder3d };
         bool showCylinder{ true };
@@ -131,6 +132,7 @@ namespace smrobot::workbench::spray::rotationbody
     class RotationBodyPlanningSession
     {
     public:
+        RotationBodyPlanningSession();
         void clear();
 
         domain::PlanningResult<void> loadModel(
@@ -233,6 +235,10 @@ namespace smrobot::workbench::spray::rotationbody
             const std::string& passId,
             double seconds);
         domain::PlanningResult<void> setTrajectoryCycleCount(int count);
+        domain::PlanningResult<void> setTrajectorySafetyTransitions(
+            bool automatic,
+            const Eigen::Vector3d& safetyPositionPlanningMeters,
+            double safetySpeedMetersPerSecond);
 
         const domain::RapidExportSettings& rapidSettings() const noexcept;
         const std::vector<domain::RapidSequenceEntry>& rapidSequence() const noexcept;
@@ -263,6 +269,7 @@ namespace smrobot::workbench::spray::rotationbody
         void invalidateAfterPlanningTransform();
         void invalidateAfterSection();
         void invalidateBoundary();
+        void synchronizeSafetyDerivedState();
         void clearCurrentTrajectory() noexcept;
         void clearAllTrajectories() noexcept;
         void advanceGeneration() noexcept;

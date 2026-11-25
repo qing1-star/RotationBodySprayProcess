@@ -342,12 +342,20 @@ namespace smrobot::workbench::spray::rotationbody
                     { "trajectory", trajectoryJson(pass.trajectory) }
                 });
             }
-            return { { "passes", std::move(passes) }, { "cycleCount", group.cycleCount } };
+            return { { "passes", std::move(passes) }, { "cycleCount", group.cycleCount },
+                { "autoSafetyTransitions", group.autoSafetyTransitions },
+                { "safetyPositionPlanningMeters", vector3Json(group.safetyPositionPlanningMeters) },
+                { "safetySpeedMetersPerSecond", group.safetySpeedMetersPerSecond } };
         }
 
         domain::TrajectoryGroup group(const Json& value)
         {
             domain::TrajectoryGroup result;
+            result.autoSafetyTransitions = value.value("autoSafetyTransitions", false);
+            if(value.contains("safetyPositionPlanningMeters")) {
+                result.safetyPositionPlanningMeters = vector3(value.at("safetyPositionPlanningMeters"));
+            }
+            result.safetySpeedMetersPerSecond = value.value("safetySpeedMetersPerSecond", 0.2);
             result.cycleCount = value.value("cycleCount", std::size_t{ 1 });
             if(result.cycleCount < 1 || result.cycleCount > 100) {
                 throw std::runtime_error("Trajectory group cycle count must be between 1 and 100.");
@@ -361,6 +369,10 @@ namespace smrobot::workbench::spray::rotationbody
                 pass.transitionAfterSeconds = item.at("transitionAfterSeconds").get<double>();
                 pass.trajectory = trajectory(item.at("trajectory"));
                 result.passes.push_back(std::move(pass));
+            }
+            if(result.autoSafetyTransitions) {
+                auto refreshed = domain::TrajectoryGroupEditor::refreshSchedule(result);
+                if(!refreshed) throw std::runtime_error(refreshed.error.message);
             }
             return result;
         }

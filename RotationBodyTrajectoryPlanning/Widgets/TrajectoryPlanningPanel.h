@@ -9,11 +9,14 @@
 #include <string>
 #include <vector>
 
+class QCheckBox;
 class QDoubleSpinBox;
 class QFormLayout;
 class QGroupBox;
 class QLabel;
 class QListWidget;
+class QListView;
+class QAbstractListModel;
 class QListWidgetItem;
 class QPushButton;
 class QSpinBox;
@@ -56,6 +59,10 @@ namespace smrobot::workbench::spray::rotationbody
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
         void trajectoryCycleCountChanged(int count);
+        void trajectorySafetyTransitionsChanged(
+            bool automatic,
+            const Eigen::Vector3d& safetyPositionPlanningMeters,
+            double safetySpeedMetersPerSecond);
 
     private:
         domain::TrajectoryGenerationParameters inputParameters() const;
@@ -65,6 +72,7 @@ namespace smrobot::workbench::spray::rotationbody
         void rebuildPassList();
         void rebuildTransitionControls();
         void syncTransitionControls();
+        void emitSafetyTransitions();
         void updateEnabledState();
         void retranslate();
 
@@ -93,7 +101,8 @@ namespace smrobot::workbench::spray::rotationbody
         std::array<QLabel*, 3> m_metricValues{};
 
         QGroupBox* m_pointsGroup{ nullptr };
-        QListWidget* m_pointList{ nullptr };
+        QListView* m_pointList{ nullptr };
+        QAbstractListModel* m_pointModel{ nullptr };
         QLabel* m_interpolationLabel{ nullptr };
         QDoubleSpinBox* m_interpolationSpin{ nullptr };
         QPushButton* m_interpolateButton{ nullptr };
@@ -105,6 +114,15 @@ namespace smrobot::workbench::spray::rotationbody
 
         QGroupBox* m_groupGroup{ nullptr };
         QListWidget* m_passList{ nullptr };
+        QCheckBox* m_automaticSafetyCheck{ nullptr };
+        std::array<QLabel*, 3> m_safetyPositionLabels{};
+        std::array<QDoubleSpinBox*, 3> m_safetyPositionSpins{};
+        QLabel* m_safetySpeedLabel{ nullptr };
+        QDoubleSpinBox* m_safetySpeedSpin{ nullptr };
+        QLabel* m_safetyHintLabel{ nullptr };
+        QLabel* m_initialTransferLabel{ nullptr };
+        QDoubleSpinBox* m_initialTransferSpin{ nullptr };
+        bool m_transitionControlsAutomatic{ false };
         QWidget* m_transitionContainer{ nullptr };
         QFormLayout* m_transitionLayout{ nullptr };
         std::vector<QDoubleSpinBox*> m_transitionSpins;

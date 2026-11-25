@@ -526,6 +526,12 @@ namespace smrobot::workbench::spray::rotationbody
                 reportResult(m_controller.setTrajectoryTransitionAfter(passId, seconds));
             });
         connect(&m_rightPanel,
+            &RotationBodyPlanningRightPanel::trajectorySafetyTransitionsChanged,
+            this,
+            [this](bool automatic, const Eigen::Vector3d& point, double speed) {
+                reportResult(m_controller.setTrajectorySafetyTransitions(automatic, point, speed));
+            });
+        connect(&m_rightPanel,
             &RotationBodyPlanningRightPanel::trajectoryCycleCountChanged,
             this,
             [this](int count) {

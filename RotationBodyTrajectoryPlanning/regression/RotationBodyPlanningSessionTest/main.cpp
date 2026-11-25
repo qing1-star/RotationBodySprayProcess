@@ -8,6 +8,7 @@
 #include "Persistence/RotationBodyPlanningDraftStore.h"
 #include "Persistence/RotationBodyTrajectoryProjectStore.h"
 #include "Widgets/ModelTransformPanel.h"
+#include "Widgets/TrajectoryPlanningPanel.h"
 #include "Widgets/RotationBodyPlanningLeftPanel.h"
 #include "Widgets/RotationBodyPlanningRightPanel.h"
 #include "Widgets/RotationBodyWorkflowNavigation.h"
@@ -17,21 +18,29 @@
 #include <AssetCore/ModelDesc.h>
 #include <SimulationProject/ProjectDocument.h>
 #include <SimulationProject/ProjectDocumentService.h>
+#include <SimulationProject/ProjectValidation.h>
 
 #include "RobotQtViewerDocumentContext.h"
 #include "RobotQtViewerDocumentController.h"
 #include "RobotQtViewerEventHub.h"
 #include "RobotQtViewerOperationStatus.h"
 #include "RobotQtViewerSelectionModel.h"
+#include "SceneEntityWorkflowController.h"
 #include "RobotQtViewerViewportPreviewState.h"
 
 #include <RotationBodyTrajectoryPlanning/Alignment/RotationBodyAlignmentSolver.h>
+#include <RotationBodyTrajectoryPlanning/TrajectoryPlanning/TrajectoryGroupEditor.h>
 
 #include <Eigen/Geometry>
 
 #include <glm/glm.hpp>
 
 #include <QApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QListView>
+#include <QItemSelectionModel>
+#include <QScrollBar>
 #include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
@@ -42,6 +51,7 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -50,6 +60,7 @@
 #include <QTableWidget>
 #include <QToolButton>
 #include <QThread>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -108,6 +119,8 @@ namespace
             , controller(context)
         {
             context.setViewportServices(&viewport);
+            context.setDocumentViewport(&viewport);
+            context.setCollisionViewport(&viewport);
         }
     };
 
@@ -505,6 +518,8 @@ namespace
     void testTrajectoryWorkspacePersistenceAndInvalidation()
     {
         app::RotationBodyPlanningSession session = populatedSession();
+        expect(session.setTrajectorySafetyTransitions(false, Eigen::Vector3d::Zero(), 0.2).ok(),
+            "legacy interval persistence regression explicitly uses manual timing");
         domain::TrajectoryGenerationParameters parameters;
         parameters.sprayDistanceMeters = 0.08;
         parameters.tiltRadians = 0.15;
@@ -606,6 +621,157 @@ namespace
             "changing the planning transform clears all dependent trajectories and ABB references");
     }
 
+    void testAutomaticSafetyTransitions()
+    {
+        app::RotationBodyPlanningSession session = populatedSession();
+        expect(session.trajectoryWorkspace().group.autoSafetyTransitions,
+            "new workspaces enable automatic safety timing");
+        const Eigen::Vector3d planningSafety(0.8, 0.9, 0.7);
+        expect(session.setTrajectorySafetyTransitions(true, planningSafety, 0.05).ok(),
+            "planning safety inputs can be set before generating passes");
+        domain::TrajectoryGenerationParameters parameters;
+        parameters.pointCount = 7;
+        parameters.tiltRadians = 0.15;
+        const auto appended = session.appendGeneratedTrajectories({ parameters, parameters });
+        expect(appended.ok() && appended.value.size() == 2,
+            "automatic timing supports a generated group");
+        if(!appended || appended.value.size() != 2) return;
+        const double slowGap = session.trajectoryWorkspace().group.passes.front()
+            .transitionAfterSeconds;
+        expect(slowGap > 0.0 && session.setTrajectorySafetyTransitions(
+                true, planningSafety, 0.1).ok(),
+            "safety speed changes refresh group intervals");
+        const domain::TrajectoryGroup group = session.trajectoryWorkspace().group;
+        expect(!session.rapidSequence().empty() &&
+            session.setRapidSequence(session.rapidSequence()).ok() &&
+            !session.setRapidSequence({}).ok(),
+            "automatic mode exposes a canonical sequence and rejects conflicting order edits");
+        expect(group.passes.front().transitionAfterSeconds < slowGap &&
+            group.passes.front().startOffsetSeconds > 0.0 &&
+            group.passes[1].startOffsetSeconds >
+                group.passes.front().trajectory.metrics.durationSeconds,
+            "group timing contains the initial inbound move and actual inter-pass transfer");
+        expect(!session.setTrajectoryTransitionAfter(appended.value.front(), 12.0).ok(),
+            "automatic intervals cannot be overwritten by a manual caller");
+        expect(!session.setTrajectorySafetyTransitions(true, planningSafety, 0.0).ok() &&
+            session.trajectoryWorkspace().group.safetySpeedMetersPerSecond == 0.1,
+            "invalid safety speed is rejected without altering persistent inputs");
+
+        Eigen::Isometry3d base = Eigen::Isometry3d::Identity();
+        base.linear() = Eigen::AngleAxisd(0.7, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        base.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+        expect(session.setBaseFromPlanning(base).ok() &&
+            session.setBaseFromPlanning(base).ok() &&
+            session.rapidSettings().safetyPositionBaseMeters.isApprox(base * planningSafety) &&
+            session.trajectoryWorkspace().group.safetyPositionPlanningMeters.isApprox(planningSafety) &&
+            session.rapidSettings().safetySpeedMetersPerSecond == 0.1 &&
+            std::abs(session.trajectoryWorkspace().group.passes.front().transitionAfterSeconds -
+                group.passes.front().transitionAfterSeconds) < 1.0e-10,
+            "repeated calibration derives base safety once and preserves planning inputs and time");
+        domain::RapidExportSettings overridden = session.rapidSettings();
+        overridden.safetyPositionBaseMeters.setConstant(9.0);
+        overridden.safetySpeedMetersPerSecond = 9.0;
+        expect(session.setRapidSettings(overridden).ok() &&
+            session.rapidSettings().safetyPositionBaseMeters.isApprox(base * planningSafety) &&
+            session.rapidSettings().safetySpeedMetersPerSecond == 0.1,
+            "ABB edits cannot introduce a second safety source in automatic mode");
+        expect(session.setTrajectoryCycleCount(3).ok() &&
+            session.trajectoryWorkspace().group.passes.back().transitionAfterSeconds > 0.0,
+            "cycle changes retain a computed return-to-first interval");
+
+        simulation_project::ProjectDocument document;
+        expect(app::RotationBodyTrajectoryProjectStore::writeWorkspace(
+            document, session.makeTrajectoryDraft()), "automatic safety workspace is serialized");
+        expect(app::RotationBodyTrajectoryProjectStore::writePublishedPlan(
+            document, session.makePublishedTrajectoryPlan()), "automatic safety plan is published");
+        const auto published = app::RotationBodyTrajectoryProjectStore::readPublishedPlan(document);
+        expect(published.plan && published.plan->group.autoSafetyTransitions &&
+            published.plan->group.safetyPositionPlanningMeters.isApprox(planningSafety) &&
+            published.plan->group.safetySpeedMetersPerSecond == 0.1 &&
+            published.plan->safetyPositionBaseMeters.isApprox(base * planningSafety),
+            "published round-trip preserves safety facts and derived base coordinates");
+        const auto read = app::RotationBodyTrajectoryProjectStore::readWorkspace(document);
+        app::RotationBodyPlanningSession restored = populatedSession();
+        expect(restored.setBaseFromPlanning(base).ok() && read.draft &&
+            restored.restoreTrajectoryDraft(*read.draft).ok() &&
+            restored.trajectoryWorkspace().group.autoSafetyTransitions &&
+            restored.trajectoryWorkspace().group.safetyPositionPlanningMeters.isApprox(planningSafety) &&
+            restored.rapidSettings().safetyPositionBaseMeters.isApprox(base * planningSafety) &&
+            restored.rapidSettings().safetySpeedMetersPerSecond == 0.1,
+            "draft round-trip preserves planning safety facts and rederives base safety");
+
+        app::TrajectoryPlanningPanel panel;
+        app::RotationBodyPlanningViewModel view;
+        view.hasModel = true;
+        view.canEditTrajectoryGroup = true;
+        view.trajectoryWorkspace = session.trajectoryWorkspace();
+        int inputEdits = 0;
+        Eigen::Vector3d editedPoint = Eigen::Vector3d::Zero();
+        double editedSpeed = 0.0;
+        QObject::connect(&panel, &app::TrajectoryPlanningPanel::trajectorySafetyTransitionsChanged,
+            [&](bool automatic, const Eigen::Vector3d& point, double speed) {
+                expect(automatic, "automatic safety edit retains its mode");
+                ++inputEdits;
+                editedPoint = point;
+                editedSpeed = speed;
+            });
+        panel.setViewModel(view);
+        auto* safetyX = panel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.safetyPlanning.X"));
+        auto* safetySpeed = panel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.safetySpeed"));
+        auto* gap = panel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.transitionAfter.1"));
+        expect(inputEdits == 0 && safetyX && safetySpeed && gap && gap->isReadOnly() &&
+            std::abs(safetyX->value() - 800.0) < 1.0e-9 &&
+            std::abs(safetySpeed->value() - 100.0) < 1.0e-9,
+            "view snapshots show millimeters and read-only per-pass timing without edit signals");
+        if(safetyX) safetyX->setValue(850.0);
+        expect(inputEdits == 1 && std::abs(editedPoint.x() - 0.85) < 1.0e-12 &&
+            std::abs(editedSpeed - 0.1) < 1.0e-12,
+            "UI safety edits emit meters and meters per second exactly once");
+
+        expect(session.setTrajectorySafetyTransitions(false, planningSafety, 0.1).ok() &&
+            session.setTrajectoryTransitionAfter(appended.value.front(), 6.0).ok(),
+            "explicit manual mode retains editable legacy intervals");
+        app::RotationBodyTrajectoryProjectStore::writeWorkspace(document, session.makeTrajectoryDraft());
+        app::RotationBodyTrajectoryProjectStore::writePublishedPlan(document, session.makePublishedTrajectoryPlan());
+        for(auto& extension : document.extensions) {
+            auto root = QJsonDocument::fromJson(QByteArray::fromStdString(
+                extension.serializedPayload)).object();
+            const bool isWorkspace = extension.key ==
+                app::RotationBodyTrajectoryProjectStore::workspaceExtensionKey;
+            auto workspace = root.value(QStringLiteral("workspace")).toObject();
+            auto legacyGroup = isWorkspace
+                ? workspace.value(QStringLiteral("group")).toObject()
+                : root.value(QStringLiteral("group")).toObject();
+            legacyGroup.remove(QStringLiteral("autoSafetyTransitions"));
+            legacyGroup.remove(QStringLiteral("safetyPositionPlanningMeters"));
+            legacyGroup.remove(QStringLiteral("safetySpeedMetersPerSecond"));
+            if(isWorkspace) {
+                workspace.insert(QStringLiteral("group"), legacyGroup);
+                root.insert(QStringLiteral("workspace"), workspace);
+            } else {
+                root.insert(QStringLiteral("group"), legacyGroup);
+            }
+            extension.serializedPayload = QJsonDocument(root).toJson(QJsonDocument::Compact).toStdString();
+        }
+        const auto legacy = app::RotationBodyTrajectoryProjectStore::readWorkspace(document);
+        const auto legacyPublished = app::RotationBodyTrajectoryProjectStore::readPublishedPlan(document);
+        expect(legacyPublished.plan && !legacyPublished.plan->group.autoSafetyTransitions &&
+            legacyPublished.plan->group.passes.front().transitionAfterSeconds == 6.0,
+            "legacy published plans keep manual timing when safety fields are absent");
+        expect(legacy.draft && !legacy.draft->workspace.group.autoSafetyTransitions &&
+            legacy.draft->workspace.group.passes.front().transitionAfterSeconds == 6.0,
+            "legacy payloads without safety fields keep manual timing");
+        view.trajectoryWorkspace = session.trajectoryWorkspace();
+        panel.setViewModel(view);
+        gap = panel.findChild<QDoubleSpinBox*>(
+            QStringLiteral("rotationBodyTrajectory.transitionAfter.1"));
+        expect(gap && !gap->isReadOnly() && gap->value() == 6.0,
+            "manual workspace snapshots restore editable interval controls");
+    }
+
     void testBatchTrajectoryAppendIsAtomic()
     {
         app::RotationBodyPlanningSession session = populatedSession();
@@ -654,6 +820,7 @@ namespace
         calibration.circleRows[2][1] = 0.125;
         calibration.topReference[2] = 0.9;
         calibration.workpieceHeightMeters = 0.45;
+        calibration.topProbeBallRadiusMeters = 0.002;
         calibration.activeMode = domain::CalibrationMode::Circle2d;
         calibration.axisSource = domain::CalibrationMode::Circle2d;
         calibration.showCylinder = false;
@@ -684,6 +851,11 @@ namespace
         calibration.frame = storedFrame;
         expect(session.setCalibrationWorkspace(calibration).ok(),
             "session accepts module-private calibration progress");
+        auto invalidRadius = calibration;
+        invalidRadius.topProbeBallRadiusMeters = -0.001;
+        expect(!session.setCalibrationWorkspace(invalidRadius).ok() &&
+            session.calibrationWorkspace().topProbeBallRadiusMeters == 0.002,
+            "invalid probe radius cannot corrupt the existing calibration workspace");
         app::RotationBodyUiState uiState;
         uiState.workflow = app::RotationBodyWorkflow::SectionRegionPlanning;
         uiState.mainViewMode = app::RotationBodyMainViewMode::Section;
@@ -702,6 +874,8 @@ namespace
         if(read.draft) {
             expect(read.draft->schemaVersion == 1 && read.draft->objectId == original.objectId,
                 "schema version and object id round trip");
+            expect(read.draft->calibration.topProbeBallRadiusMeters == 0.002,
+                "top probe radius persists without changing the private draft schema version");
             expect(read.draft->sourcePath == original.sourcePath &&
                 read.draft->sourceFingerprint == original.sourceFingerprint &&
                 read.draft->meshFingerprint == original.meshFingerprint,
@@ -826,6 +1000,28 @@ namespace
                 "matching restore resumes private calibration and page progress");
             expect(!restored.hasPendingChanges(),
                 "matching draft restore starts without pending changes");
+            expect(restored.calibrationWorkspace().topProbeBallRadiusMeters == 0.002,
+                "reopening a saved draft restores manual top probe compensation");
+        }
+
+        simulation_project::ProjectDocument legacyRadiusDocument = document;
+        auto legacyPayload = QJsonDocument::fromJson(QByteArray::fromStdString(
+            legacyRadiusDocument.extensions.front().serializedPayload)).object();
+        auto legacyCalibration = legacyPayload.value(QStringLiteral("calibration")).toObject();
+        legacyCalibration.remove(QStringLiteral("topProbeBallRadiusMeters"));
+        legacyPayload.insert(QStringLiteral("calibration"), legacyCalibration);
+        legacyRadiusDocument.extensions.front().serializedPayload =
+            QJsonDocument(legacyPayload).toJson(QJsonDocument::Compact).toStdString();
+        const auto legacyRadiusRead = app::RotationBodyPlanningDraftStore::read(legacyRadiusDocument);
+        expect(legacyRadiusRead.draft && legacyRadiusRead.draft->calibration.topProbeBallRadiusMeters == 0,
+            "legacy saved drafts missing optional probe radius retain zero compensation");
+        if(legacyRadiusRead.draft) {
+            expect(legacyRadiusRead.draft->calibration.circleRows == original.calibration.circleRows &&
+                legacyRadiusRead.draft->calibration.topReference == original.calibration.topReference &&
+                legacyRadiusRead.draft->calibration.yDirectionStart == original.calibration.yDirectionStart &&
+                legacyRadiusRead.draft->calibration.yDirectionEnd == original.calibration.yDirectionEnd &&
+                legacyRadiusRead.draft->baseFromPlanning.matrix().isApprox(original.baseFromPlanning.matrix()),
+                "adding optional radius does not alter existing points or workpiece pose");
         }
 
         app::RotationBodyPlanningDraft optionalConfidenceDraft = original;
@@ -1573,6 +1769,8 @@ namespace
             operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
+        context.setDocumentViewport(&viewport);
+        context.setCollisionViewport(&viewport);
         projectSession.document().objects.push_back(
             projectObject("destruction_workpiece"));
 
@@ -1662,6 +1860,259 @@ namespace
             app::RotationBodyPlanningDraftStore::read(
                 fixture.projectSession.document()).status == app::DraftReadStatus::Loaded,
             "post-warning discard cannot roll back the already committed project");
+    }
+
+    void testRobotBaseWorldPlacement()
+    {
+        const auto transformMatrix = [](const simulation_project::TransformDesc& pose) {
+            Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+            transform.translation() = Eigen::Vector3d(pose.x, pose.y, pose.z);
+            transform.linear() =
+                (Eigen::AngleAxisd(pose.yaw, Eigen::Vector3d::UnitZ()) *
+                 Eigen::AngleAxisd(pose.pitch, Eigen::Vector3d::UnitY()) *
+                 Eigen::AngleAxisd(pose.roll, Eigen::Vector3d::UnitX())).toRotationMatrix();
+            return transform;
+        };
+        const auto worldPoint = [](const simulation_project::Vec3Desc& point) {
+            return Eigen::Vector3d(point.x, point.y, point.z);
+        };
+        const auto loadWorkpiece = [](ControllerFixture& fixture) {
+            fixture.projectSession.document().objects.push_back(projectObject("workpiece_1"));
+            expect(fixture.controller.activate().success,
+                "robot-base fixture activates");
+            const domain::TriangleMesh mesh = tetrahedron();
+            expect(fixture.controller.session().loadModel(
+                "workpiece_1", "workpiece_1.stl", "base-placement-fingerprint",
+                mesh, identityAlignment(mesh), domain::PlanningObjectType::CompletePart).ok(),
+                "robot-base fixture loads a workpiece");
+        };
+
+        ControllerFixture fixture;
+        simulation_project::RobotDesc positioner;
+        positioner.id = "ATPPZ350";
+        positioner.name = positioner.id;
+        positioner.sourceType = "urdf";
+        positioner.sourcePath = "data/Spray420/ATPPZ350/urdf/ATPPZ350.urdf";
+        positioner.baseTransform.z = 4.0;
+        simulation_project::RobotDesc robot;
+        robot.id = "Red4600";
+        robot.name = robot.id;
+        robot.sourceType = "urdf";
+        robot.sourcePath = "data/Spray420/RedABB4600/urdf/Red4600.urdf";
+        fixture.projectSession.document().version = 3;
+        fixture.projectSession.document().robots = { positioner, robot };
+        simulation_project::RobotMountDesc mount;
+        mount.id = "spray_mount";
+        mount.robotId = robot.id;
+        mount.linkName = "Link6";
+        fixture.projectSession.document().robotMounts.push_back(mount);
+        simulation_project::AttachmentAssetDesc tool;
+        tool.id = "spray_tool";
+        tool.assetKind = "tool";
+        tool.assetType = "tool";
+        tool.visualPath = "data/Spray420/420.stl";
+        fixture.projectSession.document().attachmentAssets.push_back(tool);
+        simulation_project::MountedAttachmentDesc attachment;
+        attachment.id = "mounted_spray_tool";
+        attachment.assetId = tool.id;
+        attachment.mountFrameId = mount.id;
+        fixture.projectSession.document().mountedAttachments.push_back(attachment);
+        mount.id = "secondary_spray_mount";
+        fixture.projectSession.document().robotMounts.push_back(mount);
+        attachment.id = "another_tool_on_same_robot";
+        attachment.mountFrameId = mount.id;
+        fixture.projectSession.document().mountedAttachments.push_back(attachment);
+        loadWorkpiece(fixture);
+        std::string fixtureValidationError;
+        const bool validFixture = simulation_project::validateProjectDocument(
+            fixture.projectSession.document(), &fixtureValidationError);
+        expect(validFixture, "robot-base project fixture is valid: " + fixtureValidationError);
+        fixture.selectionModel.selectRobotLink(QStringLiteral("ATPPZ350"), QStringLiteral("base_link"));
+
+        Eigen::Isometry3d planningFromMesh = Eigen::Isometry3d::Identity();
+        planningFromMesh.translation() = Eigen::Vector3d(0.02, 0.03, 0.04);
+        planningFromMesh.linear() =
+            Eigen::AngleAxisd(0.12, Eigen::Vector3d::UnitX()).toRotationMatrix();
+        expect(fixture.controller.session().setPlanningFromMesh(planningFromMesh).ok(),
+            "robot-base fixture retains the model alignment transform");
+        app::WorkpieceCalibrationWorkspace calibration;
+        domain::CalibrationAxisFit fit;
+        fit.mode = domain::CalibrationMode::Cylinder3d;
+        fit.axisPointBaseMeters = Eigen::Vector3d(0.5, -0.2, 0.0);
+        fit.axisDirectionBase = Eigen::Vector3d::UnitZ();
+        fit.radiusMeters = 0.1;
+        fit.sourcePointsBaseMeters.push_back(Eigen::Vector3d(0.6, -0.2, 0.7));
+        calibration.cylinderFit = fit;
+        calibration.cylinderRows[0] = { 0.6, -0.2, 0.7 };
+        calibration.topReference = { 0.6, -0.2, 0.7 };
+        calibration.yDirectionStart = { 0.5, -0.2, 0.5 };
+        calibration.yDirectionEnd = { 0.5, 0.0, 0.5 };
+        calibration.workpieceHeightMeters = 0.2;
+        expect(fixture.controller.session().setCalibrationWorkspace(calibration).ok(),
+            "robot-base fixture accepts calibration inputs in meters");
+        fixture.controller.setPublishFrame(app::PublishFrame::BaseFrame);
+        expect(fixture.controller.calculateAndApplyWorkpieceFrame().success,
+            "workpiece calibration applies with the robot at the world origin");
+        Eigen::Isometry3d baseFromPlanning = Eigen::Isometry3d::Identity();
+        baseFromPlanning.translation() = Eigen::Vector3d(0.5, -0.2, 0.5);
+        const Eigen::Isometry3d baseFromMesh = baseFromPlanning * planningFromMesh;
+        expect(transformMatrix(fixture.viewport.previewedObjectTransform).matrix().isApprox(
+                   baseFromMesh.matrix(), 1.0e-12),
+            "zero robot installation preserves the original workpiece placement");
+        const auto confirmed = fixture.controller.session().confirmFrame();
+        expect(confirmed.ok(), "robot-base fixture confirms the frame: " + confirmed.error.message);
+        expect(fixture.controller.session().acceptSection(
+            fixture.controller.session().generation(), sampleSection()),
+            "robot-base fixture accepts the section");
+        expect(fixture.controller.session().acceptAutomaticRegions(
+            fixture.controller.session().generation(), sampleRegions()),
+            "robot-base fixture accepts region labels");
+        fixture.controller.session().setBoundaryMode(domain::BoundaryMode::ToothTopEnvelope);
+        expect(fixture.controller.session().acceptBoundary(
+            fixture.controller.session().generation(), sampleBoundary()),
+            "robot-base fixture accepts the matching tooth-top boundary");
+        domain::TrajectoryGenerationParameters parameters;
+        parameters.sprayDistanceMeters = 0.08;
+        parameters.tiltRadians = 0.15;
+        parameters.speedMetersPerSecond = 0.04;
+        parameters.startExtensionMeters = 0.01;
+        parameters.endExtensionMeters = 0.02;
+        parameters.pointCount = 7;
+        parameters.positionerRpm = 4.5;
+        expect(fixture.controller.session().setTrajectoryParameters(parameters).ok() &&
+            fixture.controller.session().generateCurrentTrajectory().ok() &&
+            fixture.controller.session().saveCurrentTrajectoryToGroup().ok(),
+            "robot-base fixture creates a published trajectory in the calibration frame");
+        const domain::PublishedTrajectoryPlan originalPlan =
+            fixture.controller.session().makePublishedTrajectoryPlan();
+
+        robot_qt_viewer::SceneEntityWorkflowController scene(fixture.context);
+        simulation_project::TransformDesc installation;
+        installation.z = 0.2;
+        const auto raised = scene.setRobotBaseTransform(QStringLiteral("Red4600"), installation);
+        expect(raised.success, "scene editor applies the robot elevation: " + raised.message.toStdString());
+        const auto recalculated = fixture.controller.calculateAndApplyWorkpieceFrame();
+        expect(recalculated.success, "recalculation reads the applied robot base: " +
+            recalculated.message.toStdString());
+        Eigen::Isometry3d worldFromBase = transformMatrix(installation);
+        expect(transformMatrix(fixture.viewport.previewedObjectTransform).matrix().isApprox(
+                   (worldFromBase * baseFromMesh).matrix(), 1.0e-12) &&
+            std::abs(fixture.viewport.previewedObjectTransform.z - 0.74) < 1.0e-12,
+            "a 0.2 meter robot elevation raises the workpiece by exactly 200 millimeters");
+        const QString owner = QStringLiteral("spray.rotation_body_trajectory_planning");
+        const auto* elevatedFrame = fixture.viewport.overlay(owner, QStringLiteral("planning-frame"));
+        expect(elevatedFrame != nullptr && !elevatedFrame->segments.empty() &&
+            std::abs(elevatedFrame->segments.front().startWorld.z - 0.7) < 1.0e-12,
+            "the calibrated workpiece origin moves from Z 0.5 to world Z 0.7");
+        expect(fixture.controller.calculateAndApplyWorkpieceFrame().success &&
+            fixture.controller.restoreViewportPresentation().success &&
+            transformMatrix(fixture.viewport.previewedObjectTransform).matrix().isApprox(
+                (worldFromBase * baseFromMesh).matrix(), 1.0e-12),
+            "repeated recalculation and presentation restore do not accumulate the elevation");
+
+        installation.x = 0.3;
+        installation.y = -0.4;
+        installation.roll = 0.2;
+        installation.pitch = -0.3;
+        installation.yaw = 0.5;
+        const auto installed = scene.setRobotBaseTransform(QStringLiteral("Red4600"), installation);
+        expect(installed.success, "scene editor applies the installation pose: " + installed.message.toStdString());
+        const auto restored = fixture.controller.restoreViewportPresentation();
+        expect(restored.success, "presentation restore reads the latest installation: " +
+            restored.message.toStdString());
+        worldFromBase = transformMatrix(installation);
+        const Eigen::Isometry3d worldFromPlanning = worldFromBase * baseFromPlanning;
+        const Eigen::Isometry3d expectedWorld = worldFromPlanning * planningFromMesh;
+        expect(transformMatrix(fixture.viewport.previewedObjectTransform).matrix().isApprox(
+                   expectedWorld.matrix(), 1.0e-12),
+            "robot installation rotation and translation precede calibration and model alignment");
+        const auto* frame = fixture.viewport.overlay(owner, QStringLiteral("planning-frame"));
+        const auto* section = fixture.viewport.overlay(owner, QStringLiteral("section"));
+        const auto* points = fixture.viewport.overlay(owner, QStringLiteral("calibration-points"));
+        expect(frame != nullptr && !frame->segments.empty() &&
+            worldPoint(frame->segments.front().startWorld).isApprox(
+                worldFromPlanning.translation(), 1.0e-12) &&
+            section != nullptr && !section->segments.empty() &&
+            worldPoint(section->segments.front().startWorld).isApprox(
+                worldFromPlanning * sampleSection().points3d.front(), 1.0e-12),
+            "planning axes and section geometry use the same world placement as the workpiece");
+        expect(points != nullptr && std::any_of(points->segments.begin(), points->segments.end(),
+            [&](const robot_qt_viewer::ViewportLineSegment& segment) {
+                return worldPoint(segment.startWorld).isApprox(
+                           worldFromBase * Eigen::Vector3d(0.5, -0.2, 0.5), 1.0e-12) &&
+                    worldPoint(segment.endWorld).isApprox(
+                        worldFromBase * Eigen::Vector3d(0.5, 0.0, 0.5), 1.0e-12);
+            }), "calibration reference helpers use the robot installation pose exactly once");
+        fixture.controller.setPublishFrame(app::PublishFrame::PlanningLocalFrame);
+        expect(fixture.controller.restoreViewportPresentation().success &&
+            transformMatrix(fixture.viewport.previewedObjectTransform).matrix().isApprox(
+                planningFromMesh.matrix(), 1.0e-12),
+            "local planning presentation remains independent of robot installation");
+        fixture.controller.setPublishFrame(app::PublishFrame::BaseFrame);
+        expect(fixture.controller.session().baseFromPlanning().matrix().isApprox(
+                   baseFromPlanning.matrix(), 1.0e-12) &&
+            fixture.controller.session().calibrationWorkspace().topReference == calibration.topReference &&
+            fixture.controller.session().calibrationWorkspace().frame.has_value() &&
+            fixture.controller.session().calibrationWorkspace().frame->baseFromPlanning.matrix().isApprox(
+                baseFromPlanning.matrix(), 1.0e-12),
+            "scene placement never rewrites base-coordinate inputs or the calibration result");
+        const auto saved = fixture.controller.saveProgressAndExit();
+        expect(saved.success, "robot-base workpiece save succeeds: " + saved.message.toStdString());
+        expect(transformMatrix(fixture.projectSession.document().objects.front().transform)
+            .matrix().isApprox(expectedWorld.matrix(), 1.0e-12),
+            "saved workpiece world placement matches the preview");
+        const app::PublishedTrajectoryReadResult published =
+            app::RotationBodyTrajectoryProjectStore::readPublishedPlan(fixture.projectSession.document());
+        expect(published.usable() && published.plan &&
+            published.plan->baseFromPlanning.matrix().isApprox(originalPlan.baseFromPlanning.matrix(), 1.0e-12) &&
+            published.plan->planningFromMesh.matrix().isApprox(originalPlan.planningFromMesh.matrix(), 1.0e-12) &&
+            published.plan->group.passes.size() == originalPlan.group.passes.size() &&
+            !published.plan->group.passes.empty() && !originalPlan.group.passes.empty() &&
+            !published.plan->group.passes.front().trajectory.linearPoints.empty() &&
+            !originalPlan.group.passes.front().trajectory.linearPoints.empty() &&
+            published.plan->group.passes.front().trajectory.linearPoints.front().planningFromTool.matrix().isApprox(
+                originalPlan.group.passes.front().trajectory.linearPoints.front().planningFromTool.matrix(), 1.0e-12),
+            "published trajectory transforms stay in robot base and planning coordinates");
+
+        ControllerFixture fallback;
+        loadWorkpiece(fallback);
+        expect(fallback.controller.updateBaseTransform(baseFromPlanning).success,
+            "robot-free fixture accepts the original base-coordinate placement");
+        fallback.controller.setPublishFrame(app::PublishFrame::BaseFrame);
+        expect(fallback.controller.restoreViewportPresentation().success &&
+            transformMatrix(fallback.viewport.previewedObjectTransform).matrix().isApprox(
+                baseFromPlanning.matrix(), 1.0e-12),
+            "projects without robots preserve identity installation compatibility");
+        robot.baseTransform.z = 0.2;
+        fallback.projectSession.document().robots.push_back(robot);
+        expect(fallback.controller.restoreViewportPresentation().success &&
+            std::abs(fallback.viewport.previewedObjectTransform.z - 0.7) < 1.0e-12,
+            "a single robot supplies the installation pose without a mounted tool");
+        fallback.projectSession.document().robots.push_back(positioner);
+        const simulation_project::TransformDesc originalObject =
+            fallback.projectSession.document().objects.front().transform;
+        const auto ambiguousRestore = fallback.controller.restoreViewportPresentation();
+        const auto ambiguousSave = fallback.controller.saveProgressAndExit();
+        expect(!ambiguousRestore.success && !ambiguousRestore.message.isEmpty() &&
+            !ambiguousSave.success && !ambiguousSave.message.isEmpty() && fallback.controller.isActive() &&
+            transformMatrix(fallback.projectSession.document().objects.front().transform).matrix().isApprox(
+                transformMatrix(originalObject).matrix(), 1.0e-12) &&
+            app::RotationBodyPlanningDraftStore::read(fallback.projectSession.document()).status ==
+                app::DraftReadStatus::NotFound,
+            "ambiguous multi-robot placement fails restore and save without committing a guessed transform");
+        fallback.viewport.motionJoints[QStringLiteral("Red4600")].resize(6);
+        fallback.viewport.motionJoints[QStringLiteral("ATPPZ350")].resize(2);
+        fallback.selectionModel.selectRobotLink(
+            QStringLiteral("ATPPZ350"), QStringLiteral("base_link"));
+        expect(fallback.controller.restoreViewportPresentation().success &&
+            std::abs(fallback.viewport.previewedObjectTransform.z - 0.7) < 1.0e-12,
+            "the sole six-axis robot supplies the base when the tool is still a scene object");
+        fallback.viewport.motionJoints[QStringLiteral("ATPPZ350")].resize(6);
+        expect(!fallback.controller.restoreViewportPresentation().success &&
+            !fallback.controller.saveProgressAndExit().success &&
+            transformMatrix(fallback.projectSession.document().objects.front().transform).matrix().isApprox(
+                transformMatrix(originalObject).matrix(), 1.0e-12),
+            "two six-axis robots remain ambiguous without an attached tool owner");
     }
 
     void testSavePublishesCurrentTrajectoryParameters()
@@ -1811,6 +2262,55 @@ namespace
         return boundary;
     }
 
+    void testLargeTrajectoryPointList()
+    {
+        app::TrajectoryPlanningPanel panel;
+        app::RotationBodyPlanningViewModel viewModel;
+        domain::PlannedTrajectory trajectory;
+        trajectory.linearPoints.resize(100000);
+        for(std::size_t i = 0; i < trajectory.linearPoints.size(); ++i) {
+            auto& point = trajectory.linearPoints[i];
+            point.timeSeconds = i * 0.01;
+            point.interpolated = i != 0;
+            point.planningFromTool.translation().x() = i * 0.00001;
+        }
+        trajectory.relativeHelicalPoints = trajectory.linearPoints;
+        viewModel.trajectoryWorkspace.currentTrajectory = std::move(trajectory);
+        QElapsedTimer timer;
+        timer.start();
+        panel.setViewModel(viewModel);
+        auto* list = panel.findChild<QListView*>(QStringLiteral("rotationBodyTrajectory.pointList"));
+        expect(list && list->model()->rowCount() == 100000, "large interpolated list exposes every point");
+        if(!list) return;
+        panel.resize(460, 900);
+        panel.show();
+        QApplication::processEvents();
+        const qint64 initialization = timer.elapsed();
+        expect(list->model()->data(list->model()->index(0, 0)).toString().startsWith(QStringLiteral("A  ")),
+            "point-list start marker is preserved");
+        const QModelIndex last = list->model()->index(99999, 0);
+        expect(last.data().toString().startsWith(QStringLiteral("B  ")),
+            "point-list end marker is preserved");
+        int selections = 0;
+        QObject::connect(&panel, &app::TrajectoryPlanningPanel::pointSelectionChanged,
+            [&](const std::vector<std::size_t>&) { ++selections; });
+        list->selectionModel()->select(last, QItemSelectionModel::Select);
+        expect(panel.selectedPointIndices() == std::vector<std::size_t>{ 99999 },
+            "point selection retains the exact trajectory index");
+        expect(selections == 1, "selection emits exactly one change");
+        timer.restart();
+        for(int frame = 0; frame < 20; ++frame) {
+            list->scrollTo(list->model()->index(frame * 4999, 0));
+            QApplication::processEvents();
+        }
+        std::cout << "Point-list 100000 points: setup=" << initialization
+                  << " ms, 20 scrolls=" << timer.elapsed() << " ms\n";
+        viewModel.trajectoryWorkspace.currentTrajectory.reset();
+        panel.setViewModel(viewModel);
+        expect(list->model()->rowCount() == 0 && panel.selectedPointIndices().empty(),
+            "point-list reset clears stale points and selection");
+    }
+
     void testViewportOverlays()
     {
         simulation_project::ProjectSession projectSession;
@@ -1830,6 +2330,8 @@ namespace
             operationStatusStore);
         FakeRotationBodyViewportServices viewport;
         context.setViewportServices(&viewport);
+        context.setDocumentViewport(&viewport);
+        context.setCollisionViewport(&viewport);
         app::RotationBodyPlanningController controller(context);
         expect(controller.activate().success, "overlay controller activates");
 
@@ -1973,7 +2475,7 @@ namespace
                 viewport.focusedObjectId ==
                     QStringLiteral("overlay_workpiece") &&
                 viewport.focusedObjectView ==
-                    robot_qt_viewer::RobotQtViewerObjectFocusView::Isometric &&
+                    robot_qt_viewer::RobotQtViewerObjectFocusView::Home &&
                 std::abs(viewport.previewedObjectTransform.x - 0.11) <
                     1.0e-12 &&
                 std::abs(viewport.previewedObjectTransform.y + 0.22) <
@@ -1981,7 +2483,7 @@ namespace
                 std::abs(viewport.previewedObjectTransform.z - 0.33) <
                     1.0e-12 &&
                 std::abs(viewport.previewedObjectTransform.yaw - 0.2) < 1.0e-12,
-            "presentation restore replays the model preview with isometric "
+            "presentation restore replays the model preview with engineering home "
             "focus");
 
         app::RotationBodyPlanningLeftPanel leftPanel;
@@ -2036,6 +2538,121 @@ namespace
         expect(!viewport.overlays.contains(ownerId) &&
             viewport.clearedOwners.contains(ownerId),
             "module exit clears its overlay owner after viewport reload");
+    }
+
+    void testAutomaticRelativeGroupViewport()
+    {
+        ControllerFixture fixture;
+        expect(fixture.controller.activate().success,
+            "relative group overlay fixture activates");
+        app::RotationBodyPlanningSession prepared = populatedSession();
+        auto& session = fixture.controller.session();
+        expect(session.restoreDraft(prepared.makeDraft(), tetrahedron(), "fingerprint-a").ok(),
+            "relative group overlay restores planning geometry");
+        Eigen::Isometry3d base = Eigen::Isometry3d::Identity();
+        base.linear() = Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        base.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+        const Eigen::Vector3d safety(0.8, 0.9, 0.7);
+        expect(session.setBaseFromPlanning(base).ok() &&
+            session.setTrajectorySafetyTransitions(true, safety, 0.5).ok(),
+            "relative group overlay accepts calibrated safety inputs");
+        domain::TrajectoryGenerationParameters forward;
+        forward.pointCount = 4;
+        forward.speedMetersPerSecond = 0.37;
+        forward.positionerRpm = 7.3;
+        forward.tiltRadians = 0.15;
+        auto reverse = forward;
+        reverse.reversed = true;
+        const auto appended = session.appendGeneratedTrajectories({ forward, reverse });
+        expect(appended.ok() && appended.value.size() == 2,
+            "relative group overlay generates an outward and return pair");
+        if(!appended || appended.value.size() != 2) return;
+        session.setTrajectoryDisplayMode(domain::TrajectoryDisplayMode::RelativeHelical);
+        const QString owner = QStringLiteral("spray.rotation_body_trajectory_planning");
+        const auto paths = [&]() {
+            return fixture.viewport.overlay(owner, QStringLiteral("trajectory-paths"));
+        };
+        const auto isColor = [](const robot_qt_viewer::ViewportLineSegment& segment,
+                                int red, int green, int blue) {
+            return std::abs(segment.color.r * 255.0 - red) < 1.0e-9 &&
+                std::abs(segment.color.g * 255.0 - green) < 1.0e-9 &&
+                std::abs(segment.color.b * 255.0 - blue) < 1.0e-9;
+        };
+        const auto countColor = [&](int red, int green, int blue) {
+            const auto* overlay = paths();
+            return overlay == nullptr ? std::size_t{ 0 } :
+                static_cast<std::size_t>(std::count_if(overlay->segments.begin(),
+                    overlay->segments.end(), [&](const auto& segment) {
+                        return isColor(segment, red, green, blue);
+                    }));
+        };
+        const auto point = [](const simulation_project::Vec3Desc& value) {
+            return Eigen::Vector3d(value.x, value.y, value.z);
+        };
+        expect(fixture.controller.rebuildViewportOverlay().success && paths() != nullptr,
+            "one-cycle relative overlay rebuilds");
+        if(paths() == nullptr) return;
+        const std::size_t oneCycleSegments = paths()->segments.size();
+        expect(countColor(174, 105, 255) == 6 && countColor(55, 155, 255) > 2 &&
+            point(paths()->segments.front().startWorld).isApprox(safety, 1.0e-10),
+            "relative overlay includes curved inbound and outbound safety moves in planning coordinates");
+        expect(session.setTrajectoryCycleCount(15).ok() &&
+            fixture.controller.rebuildViewportOverlay().success && paths() != nullptr,
+            "fifteen-cycle relative overlay rebuilds");
+        if(paths() == nullptr) return;
+        expect(countColor(174, 105, 255) == 90 &&
+            paths()->segments.size() > oneCycleSegments * 10,
+            "relative overlay contains spray and safety paths from every group cycle");
+        std::vector<std::size_t> sprayIndices;
+        for(std::size_t index = 0; index < paths()->segments.size(); ++index) {
+            if(isColor(paths()->segments[index], 174, 105, 255)) sprayIndices.push_back(index);
+        }
+        if(sprayIndices.size() >= 7) {
+            expect(sprayIndices[3] == sprayIndices[2] + 1,
+                "outward and return legs remain continuous before returning to safety");
+            expect(!point(paths()->segments[sprayIndices[6]].endWorld).isApprox(
+                point(paths()->segments[sprayIndices[0]].endWorld), 1.0e-5),
+                "later cycles retain accumulated positioner phase");
+        }
+        const auto firstLocal = paths()->segments.front();
+        session.setPublishFrame(app::PublishFrame::BaseFrame);
+        expect(fixture.controller.rebuildViewportOverlay().success && paths() != nullptr &&
+            point(paths()->segments.front().startWorld).isApprox(
+                base * point(firstLocal.startWorld), 1.0e-10) &&
+            point(paths()->segments.front().endWorld).isApprox(
+                base * point(firstLocal.endWorld), 1.0e-10),
+            "relative group poses map from planning coordinates to the robot base exactly once");
+        session.setPublishFrame(app::PublishFrame::PlanningLocalFrame);
+        session.setTrajectoryDisplayMode(domain::TrajectoryDisplayMode::Linear);
+        expect(fixture.controller.rebuildViewportOverlay().success && paths() != nullptr &&
+            paths()->segments.size() == 6,
+            "linear overlay keeps each saved pass's editable geometry once");
+        session.setTrajectoryDisplayMode(domain::TrajectoryDisplayMode::RelativeHelical);
+        expect(session.setTrajectorySafetyTransitions(false, safety, 0.5).ok() &&
+            fixture.controller.rebuildViewportOverlay().success && paths() != nullptr &&
+            paths()->segments.size() == 6 && countColor(55, 155, 255) == 0,
+            "manual relative overlay retains the stored single-pass presentation");
+        expect(session.setTrajectorySafetyTransitions(true, safety, 0.5).ok() &&
+            session.loadTrajectoryForEditing(appended.value.front()).ok() &&
+            fixture.controller.rebuildViewportOverlay().success &&
+            countColor(174, 105, 255) == 45 && countColor(255, 94, 196) == 3,
+            "editing suppresses repeated saved-pass geometry and draws the current trajectory once");
+        expect(session.setTrajectoryPassVisible(appended.value.back(), false).ok(),
+            "relative group overlay hides the remaining saved pass");
+        fixture.controller.setSelectedTrajectoryPointIndices({ 1 });
+        const auto* frames = fixture.viewport.overlay(owner, QStringLiteral("trajectory-frames"));
+        expect(paths() != nullptr && paths()->segments.size() == 3 &&
+            frames != nullptr && frames->segments.size() == 12,
+            "hidden and edited saved passes leave only current editable points");
+        if(frames != nullptr && frames->segments.size() == 12) {
+            const auto& selectedAxis = frames->segments[3];
+            expect(point(selectedAxis.startWorld).isApprox(
+                    session.trajectoryWorkspace().currentTrajectory->relativeHelicalPoints[1]
+                        .planningFromTool.translation(), 1.0e-10) &&
+                std::abs((point(selectedAxis.endWorld) - point(selectedAxis.startWorld)).norm() -
+                    0.012) < 1.0e-10 && isColor(selectedAxis, 255, 72, 72),
+                "current trajectory selection keeps its original point index and highlighted frame");
+        }
     }
 
     void testCoordinatorReportsSourceChangedDraft()
@@ -2612,11 +3229,61 @@ namespace
 
 int main(int argc, char** argv)
 {
-    qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+    const bool renderSafety = argc == 3 && std::string(argv[1]) == "--render-safety";
+    qputenv("QT_QPA_PLATFORM", renderSafety
+        ? QByteArrayLiteral("windows") : QByteArrayLiteral("offscreen"));
     QApplication application(argc, argv);
+    if(renderSafety) {
+        app::RotationBodyPlanningSession session = populatedSession();
+        domain::TrajectoryGenerationParameters forward;
+        forward.sprayDistanceMeters = 0.11;
+        forward.tiltRadians = 0.15;
+        forward.speedMetersPerSecond = 0.01;
+        forward.pointCount = 15;
+        forward.positionerRpm = 65.0;
+        auto reverse = forward;
+        reverse.reversed = true;
+        auto otherForward = forward;
+        otherForward.tiltRadians = -0.15;
+        auto otherReverse = otherForward;
+        otherReverse.reversed = true;
+        const auto safety = session.setTrajectorySafetyTransitions(
+            true, Eigen::Vector3d(0.35, 0.4, 0.5), 0.2);
+        const auto generated = session.appendGeneratedTrajectories(
+            { forward, reverse, otherForward, otherReverse });
+        if(!safety || !generated || !session.setTrajectoryCycleCount(3)) return 2;
+        app::RotationBodyPlanningViewModel view;
+        view.hasModel = true;
+        view.canGenerateTrajectory = true;
+        view.canEditTrajectoryGroup = true;
+        view.trajectoryWorkspace = session.trajectoryWorkspace();
+        view.rapidSettings = session.rapidSettings();
+        view.rapidSequence = session.rapidSequence();
+        QScrollArea window;
+        window.setWindowTitle(QString::fromUtf8("回转体轨迹规划：自动安全间隔"));
+        window.setWidgetResizable(true);
+        window.setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* panel = new app::TrajectoryPlanningPanel(&window);
+        panel->setLanguageCode(QStringLiteral("zh-CN"));
+        panel->setViewModel(view);
+        window.setWidget(panel);
+        window.resize(760, 960);
+        window.show();
+        const QString output = QString::fromLocal8Bit(argv[2]);
+        QTimer::singleShot(200, &window, [&window]() {
+            window.verticalScrollBar()->setValue(window.verticalScrollBar()->maximum());
+        });
+        QTimer::singleShot(450, &window, [&application, &window, output]() {
+            const bool saved = window.grab().save(output, "PNG");
+            std::cout << "Safety planning Windows render: " << (saved ? "saved" : "failed") << '\n';
+            application.exit(saved ? 0 : 2);
+        });
+        return application.exec();
+    }
     testSessionGenerationAndInvalidation();
     testSessionClearRestoresDefaults();
     testTrajectoryWorkspacePersistenceAndInvalidation();
+    testAutomaticSafetyTransitions();
     testBatchTrajectoryAppendIsAtomic();
     testDraftRoundTripAndDegradation();
     testSessionDraftRestoreSourceChange();
@@ -2628,12 +3295,15 @@ int main(int argc, char** argv)
     testControllerAsyncImportAndCancellation();
     testControllerDestructionDrainsPrivateWorkerPool();
     testSaveCommitSurvivesViewportReloadFailure();
+    testRobotBaseWorldPlacement();
     testSavePublishesCurrentTrajectoryParameters();
     testCoordinatorReportsCommittedSaveWarning();
     testWorkflowWidgetsAndTranslations();
     testSixStageWidgetEnableMatrix();
     testSectionViewRenderingAndInteraction();
     testViewportOverlays();
+    testAutomaticRelativeGroupViewport();
+    testLargeTrajectoryPointList();
     testCoordinatorReportsSourceChangedDraft();
     if(failures != 0) {
         std::cerr << failures << " regression assertion(s) failed.\n";

@@ -5,10 +5,13 @@
 #include <QMap>
 
 class FakeRotationBodyViewportServices final
-    : public robot_qt_viewer::RobotQtViewerViewportServices
+    : public robot_qt_viewer::RobotQtViewerViewportServices,
+      public robot_qt_viewer::IRobotQtViewerDocumentViewportPort,
+      public robot_qt_viewer::IRobotQtViewerCollisionViewportPort
 {
 public:
     QMap<QString, QMap<QString, robot_qt_viewer::ViewportLineOverlay>> overlays;
+    QMap<QString, std::vector<std::pair<std::string, std::string>>> motionJoints;
     QStringList clearedOwners;
     QString previewedObjectId;
     simulation_project::TransformDesc previewedObjectTransform;
@@ -108,6 +111,11 @@ public:
     bool previewRobotMountTransform(
         const QString&,
         const simulation_project::TransformDesc&) override { return false; }
+    bool previewMountedAttachmentTransform(
+        const QString&,
+        const simulation_project::TransformDesc&) override { return false; }
+    bool previewAttachmentAsset(
+        const simulation_project::AttachmentAssetDesc&) override { return false; }
     bool previewRobotMountLink(const QString&, const QString&) override { return false; }
     bool upsertPreviewRobotMount(const simulation_project::RobotMountDesc&) override { return false; }
     bool removePreviewRobotMount(const QString&) override { return false; }
@@ -194,6 +202,10 @@ public:
         focusedObjectView = robot_qt_viewer::RobotQtViewerObjectFocusView::Front;
         return { true, {} };
     }
+    std::filesystem::path projectBasePath() const override
+    {
+        return RobotQtViewerViewportServices::projectBasePath();
+    }
     bool refreshCollisionConfiguration(
         const simulation_project::ProjectDocument&,
         const std::filesystem::path&) override { return true; }
@@ -201,6 +213,7 @@ public:
     bool collisionQueriesEnabled() const override { return false; }
     bool setCollisionQueriesEnabled(bool) override { return false; }
     bool setActiveCollisionDetector(const QString&) override { return false; }
+    bool refreshCollisionDetectorNearest(const QString&) override { return false; }
     bool setCollisionDetectorEnabled(const QString&, bool) override { return false; }
     bool setCollisionDetectorVisible(const QString&, bool) override { return false; }
     bool updateCollisionDetectorRuntimeOptions(
@@ -286,12 +299,28 @@ public:
         }
         return 0.0;
     }
+    RobotForwardKinematics robotForwardKinematics(
+        const QString&,
+        const std::vector<std::string>&,
+        bool) const override
+    {
+        return {};
+    }
+    std::vector<std::pair<std::string, std::string>> robotMotionJoints(
+        const QString& robotId) const override
+    {
+        return motionJoints.value(robotId);
+    }
     void setRobotJointValue(const QString&, const QString&, double) override {}
     void setRobotAutoMotion(const QString&, bool, double, double) override {}
     void setTrajectoryControlPointOverlay(
         const QString&,
-        const std::vector<simulation_project::TransformDesc>&) override {}
+        const std::vector<simulation_project::TransformDesc>&,
+        bool) override {}
     void clearTrajectoryControlPointOverlay() override {}
+    void setEndEffectorTraceVisible(const QString&, bool) override {}
+    void appendEndEffectorTraceSample() override {}
+    void clearEndEffectorTrace() override {}
     void setSprayRangeVisible(const QString&, bool) override {}
     robot_qt_viewer::SprayMeasurementResult sprayMeasurement(
         const QString&) const override { return {}; }

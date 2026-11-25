@@ -67,6 +67,10 @@ namespace smrobot::workbench::spray::rotationbody
         void trajectoryVisibilityChanged(const std::string& passId, bool visible);
         void trajectoryTransitionChanged(const std::string& passId, double seconds);
         void trajectoryCycleCountChanged(int count);
+        void trajectorySafetyTransitionsChanged(
+            bool automatic,
+            const Eigen::Vector3d& safetyPositionPlanningMeters,
+            double safetySpeedMetersPerSecond);
         void mainViewModeChanged(RotationBodyMainViewMode mode);
         void extractSectionRequested();
         void recognizeRegionsRequested();

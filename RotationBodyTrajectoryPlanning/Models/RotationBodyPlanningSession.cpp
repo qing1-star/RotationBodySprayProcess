@@ -176,10 +176,17 @@ namespace smrobot::workbench::spray::rotationbody
             return rowsValid &&
                 std::isfinite(workspace.workpieceHeightMeters) &&
                 workspace.workpieceHeightMeters > 0.0 &&
+                std::isfinite(workspace.topProbeBallRadiusMeters) &&
+                workspace.topProbeBallRadiusMeters >= 0.0 &&
                 (!workspace.cylinderFit || validCalibrationFit(*workspace.cylinderFit)) &&
                 (!workspace.circleFit || validCalibrationFit(*workspace.circleFit)) &&
                 (!workspace.frame || validCalibrationFrame(*workspace.frame));
         }
+    }
+
+    RotationBodyPlanningSession::RotationBodyPlanningSession()
+    {
+        m_trajectoryWorkspace.group.autoSafetyTransitions = true;
     }
 
     void RotationBodyPlanningSession::clear()
@@ -209,6 +216,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_boundary.reset();
         clearCurrentTrajectory();
         m_trajectoryWorkspace = {};
+        m_trajectoryWorkspace.group.autoSafetyTransitions = true;
         m_rapidSettings = {};
         m_rapidSequence.clear();
         m_calibrationWorkspace = {};
@@ -281,6 +289,10 @@ namespace smrobot::workbench::spray::rotationbody
         m_boundary.reset();
         clearCurrentTrajectory();
         clearAllTrajectories();
+        m_trajectoryWorkspace.group.autoSafetyTransitions = true;
+        m_trajectoryWorkspace.group.safetyPositionPlanningMeters.setZero();
+        m_trajectoryWorkspace.group.safetySpeedMetersPerSecond = 0.2;
+        synchronizeSafetyDerivedState();
         m_error = {};
         m_hasPendingChanges = true;
         advanceGeneration();
@@ -376,6 +388,10 @@ namespace smrobot::workbench::spray::rotationbody
         m_editHistory.reset();
         m_boundary.reset();
         clearAllTrajectories();
+        m_trajectoryWorkspace.group.autoSafetyTransitions = true;
+        m_trajectoryWorkspace.group.safetyPositionPlanningMeters.setZero();
+        m_trajectoryWorkspace.group.safetySpeedMetersPerSecond = 0.2;
+        synchronizeSafetyDerivedState();
         if(sourceChanged) {
             m_stage = domain::PlanningStage::ModelLoaded;
             m_hasPendingChanges = true;
@@ -482,6 +498,11 @@ namespace smrobot::workbench::spray::rotationbody
                 "The saved trajectory workspace does not match the planning workpiece.");
         }
 
+        if(draft.workspace.group.autoSafetyTransitions) {
+            const auto refreshed = domain::TrajectoryGroupEditor::refreshSchedule(
+                draft.workspace.group);
+            if(!refreshed) return refreshed;
+        }
         domain::PlanningResult<void> groupValidation =
             domain::TrajectoryGroupEditor::validate(draft.workspace.group);
         if(!groupValidation) {
@@ -506,6 +527,14 @@ namespace smrobot::workbench::spray::rotationbody
             return domain::PlanningResult<void>::failure(
                 domain::PlanningErrorCode::InvalidArgument,
                 "The saved trajectory editing target no longer exists.");
+        }
+        if(draft.workspace.group.autoSafetyTransitions) {
+            draft.rapidSettings.safetyPositionBaseMeters =
+                m_baseFromPlanning * draft.workspace.group.safetyPositionPlanningMeters;
+            draft.rapidSettings.safetySpeedMetersPerSecond =
+                draft.workspace.group.safetySpeedMetersPerSecond;
+            draft.rapidSequence = domain::TrajectoryGroupEditor::automaticExecutionSequence(
+                draft.workspace.group);
         }
         if(!draft.rapidSettings.safetyPositionBaseMeters.allFinite() ||
             !std::isfinite(draft.rapidSettings.safetySpeedMetersPerSecond) ||
@@ -550,6 +579,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_trajectoryWorkspace = std::move(draft.workspace);
         m_rapidSettings = std::move(draft.rapidSettings);
         m_rapidSequence = std::move(draft.rapidSequence);
+        synchronizeSafetyDerivedState();
         m_hasPendingChanges = false;
         return domain::PlanningResult<void>::success();
     }
@@ -688,7 +718,12 @@ namespace smrobot::workbench::spray::rotationbody
                 domain::PlanningErrorCode::InvalidArgument,
                 "The base transform must be a finite rigid transform.");
         }
+        domain::TrajectoryGroup group = m_trajectoryWorkspace.group;
+        const auto refreshed = domain::TrajectoryGroupEditor::refreshSchedule(group);
+        if(!refreshed) return refreshed;
         m_baseFromPlanning = transform;
+        m_trajectoryWorkspace.group = std::move(group);
+        synchronizeSafetyDerivedState();
         m_hasPendingChanges = true;
         return domain::PlanningResult<void>::success();
     }
@@ -1093,6 +1128,7 @@ namespace smrobot::workbench::spray::rotationbody
             m_trajectoryWorkspace.editingPassId);
         if(saved) {
             clearCurrentTrajectory();
+            synchronizeSafetyDerivedState();
             m_hasPendingChanges = true;
         }
         return saved;
@@ -1146,6 +1182,7 @@ namespace smrobot::workbench::spray::rotationbody
         }
 
         m_trajectoryWorkspace.group = std::move(candidate);
+        synchronizeSafetyDerivedState();
         m_hasPendingChanges = true;
         return domain::PlanningResult<std::vector<std::string>>::success(
             std::move(addedIds));
@@ -1172,6 +1209,7 @@ namespace smrobot::workbench::spray::rotationbody
                         entry.trajectoryPassId == passId;
                 }),
             m_rapidSequence.end());
+        synchronizeSafetyDerivedState();
         m_hasPendingChanges = true;
         return domain::PlanningResult<void>::success();
     }
@@ -1194,6 +1232,11 @@ namespace smrobot::workbench::spray::rotationbody
         const std::string& passId,
         double seconds)
     {
+        if(m_trajectoryWorkspace.group.autoSafetyTransitions) {
+            return domain::PlanningResult<void>::failure(
+                domain::PlanningErrorCode::InvalidArgument,
+                "Automatic safety transfer intervals are derived from the trajectory group.");
+        }
         domain::PlanningResult<void> result = domain::TrajectoryGroupEditor::setTransitionAfter(
             m_trajectoryWorkspace.group,
             passId,
@@ -1212,9 +1255,37 @@ namespace smrobot::workbench::spray::rotationbody
                 "Trajectory group cycle count must be between 1 and 100.");
         }
         if(m_trajectoryWorkspace.group.cycleCount != static_cast<std::size_t>(count)) {
-            m_trajectoryWorkspace.group.cycleCount = static_cast<std::size_t>(count);
+            domain::TrajectoryGroup group = m_trajectoryWorkspace.group;
+            group.cycleCount = static_cast<std::size_t>(count);
+            const auto refreshed = domain::TrajectoryGroupEditor::refreshSchedule(group);
+            if(!refreshed) return refreshed;
+            m_trajectoryWorkspace.group = std::move(group);
+            synchronizeSafetyDerivedState();
             m_hasPendingChanges = true;
         }
+        return domain::PlanningResult<void>::success();
+    }
+
+    domain::PlanningResult<void> RotationBodyPlanningSession::setTrajectorySafetyTransitions(
+        bool automatic,
+        const Eigen::Vector3d& safetyPositionPlanningMeters,
+        double safetySpeedMetersPerSecond)
+    {
+        if(!safetyPositionPlanningMeters.allFinite() ||
+            !std::isfinite(safetySpeedMetersPerSecond) || safetySpeedMetersPerSecond <= 0.0) {
+            return domain::PlanningResult<void>::failure(
+                domain::PlanningErrorCode::InvalidArgument,
+                "The planning-coordinate safety point and positive safety speed must be finite.");
+        }
+        domain::TrajectoryGroup group = m_trajectoryWorkspace.group;
+        group.autoSafetyTransitions = automatic;
+        group.safetyPositionPlanningMeters = safetyPositionPlanningMeters;
+        group.safetySpeedMetersPerSecond = safetySpeedMetersPerSecond;
+        const auto refreshed = domain::TrajectoryGroupEditor::refreshSchedule(group);
+        if(!refreshed) return refreshed;
+        m_trajectoryWorkspace.group = std::move(group);
+        synchronizeSafetyDerivedState();
+        m_hasPendingChanges = true;
         return domain::PlanningResult<void>::success();
     }
 
@@ -1243,6 +1314,7 @@ namespace smrobot::workbench::spray::rotationbody
                 "ABB RAPID settings are invalid.");
         }
         m_rapidSettings = settings;
+        synchronizeSafetyDerivedState();
         m_hasPendingChanges = true;
         return domain::PlanningResult<void>::success();
     }
@@ -1250,6 +1322,21 @@ namespace smrobot::workbench::spray::rotationbody
     domain::PlanningResult<void> RotationBodyPlanningSession::setRapidSequence(
         std::vector<domain::RapidSequenceEntry> sequence)
     {
+        if(m_trajectoryWorkspace.group.autoSafetyTransitions) {
+            const auto expected = domain::TrajectoryGroupEditor::automaticExecutionSequence(
+                m_trajectoryWorkspace.group);
+            const bool matches = sequence.size() == expected.size() && std::equal(
+                sequence.begin(), sequence.end(), expected.begin(),
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs.kind == rhs.kind && lhs.trajectoryPassId == rhs.trajectoryPassId;
+                });
+            if(!matches) {
+                return domain::PlanningResult<void>::failure(
+                    domain::PlanningErrorCode::InvalidArgument,
+                    "Automatic safety timing uses the generated trajectory order.");
+            }
+            return domain::PlanningResult<void>::success();
+        }
         for(const domain::RapidSequenceEntry& entry : sequence) {
             if(entry.kind == domain::RapidSequenceEntryKind::Trajectory &&
                 domain::TrajectoryGroupEditor::find(
@@ -1425,6 +1512,17 @@ namespace smrobot::workbench::spray::rotationbody
         advanceGeneration();
     }
 
+    void RotationBodyPlanningSession::synchronizeSafetyDerivedState()
+    {
+        const domain::TrajectoryGroup& group = m_trajectoryWorkspace.group;
+        if(!group.autoSafetyTransitions) return;
+        // Always derive from the original planning point, never from the last base point.
+        m_rapidSettings.safetyPositionBaseMeters =
+            m_baseFromPlanning * group.safetyPositionPlanningMeters;
+        m_rapidSettings.safetySpeedMetersPerSecond = group.safetySpeedMetersPerSecond;
+        m_rapidSequence = domain::TrajectoryGroupEditor::automaticExecutionSequence(group);
+    }
+
     void RotationBodyPlanningSession::clearCurrentTrajectory() noexcept
     {
         m_trajectoryWorkspace.currentTrajectory.reset();
@@ -1435,8 +1533,14 @@ namespace smrobot::workbench::spray::rotationbody
     {
         const domain::TrajectoryGenerationParameters parameters =
             m_trajectoryWorkspace.parameters;
+        const bool automaticSafety = m_trajectoryWorkspace.group.autoSafetyTransitions;
+        const Eigen::Vector3d safetyPosition = m_trajectoryWorkspace.group.safetyPositionPlanningMeters;
+        const double safetySpeed = m_trajectoryWorkspace.group.safetySpeedMetersPerSecond;
         m_trajectoryWorkspace = {};
         m_trajectoryWorkspace.parameters = parameters;
+        m_trajectoryWorkspace.group.autoSafetyTransitions = automaticSafety;
+        m_trajectoryWorkspace.group.safetyPositionPlanningMeters = safetyPosition;
+        m_trajectoryWorkspace.group.safetySpeedMetersPerSecond = safetySpeed;
         m_rapidSequence.clear();
     }
 

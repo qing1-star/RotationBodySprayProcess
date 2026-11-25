@@ -1294,6 +1294,8 @@ namespace smrobot::workbench::spray::rotationbody
     RotationBodyControllerResult RotationBodyPlanningController::updatePlanningTransform(
         const Eigen::Isometry3d& transform)
     {
+        const auto display = displayFromBase();
+        if(!display) return domainFailure(display.error);
         const domain::PlanningResult<void> result = m_session.setPlanningFromMesh(transform);
         if(!result) {
             return domainFailure(result.error);
@@ -1351,6 +1353,8 @@ namespace smrobot::workbench::spray::rotationbody
     RotationBodyControllerResult RotationBodyPlanningController::updateBaseTransform(
         const Eigen::Isometry3d& transform)
     {
+        const auto display = displayFromBase();
+        if(!display) return domainFailure(display.error);
         const domain::PlanningResult<void> result = m_session.setBaseFromPlanning(transform);
         if(!result) {
             return domainFailure(result.error);
@@ -1381,6 +1385,9 @@ namespace smrobot::workbench::spray::rotationbody
                 QStringLiteral("Load a workpiece model before applying the calibrated pose.")
             };
         }
+
+        const auto display = displayFromBase();
+        if(!display) return domainFailure(display.error);
 
         WorkpieceCalibrationWorkspace workspace = m_session.calibrationWorkspace();
         const std::optional<domain::CalibrationAxisFit>& fit =
@@ -1448,7 +1455,14 @@ namespace smrobot::workbench::spray::rotationbody
 
     void RotationBodyPlanningController::setPublishFrame(PublishFrame frame)
     {
+        const PublishFrame previous = m_session.publishFrame();
         m_session.setPublishFrame(frame);
+        const auto display = displayFromBase();
+        if(!display) {
+            m_session.setPublishFrame(previous);
+            domainFailure(display.error);
+            return;
+        }
         previewAndFocus();
         publishState();
     }
@@ -1921,6 +1935,21 @@ namespace smrobot::workbench::spray::rotationbody
     {
         const domain::PlanningResult<void> result = m_session.setTrajectoryCycleCount(count);
         if(!result) return domainFailure(result.error);
+        clearRapidPreview();
+        m_session.clearError();
+        publishState();
+        return { true, {} };
+    }
+
+    RotationBodyControllerResult RotationBodyPlanningController::setTrajectorySafetyTransitions(
+        bool automatic,
+        const Eigen::Vector3d& safetyPositionPlanningMeters,
+        double safetySpeedMetersPerSecond)
+    {
+        const auto result = m_session.setTrajectorySafetyTransitions(
+            automatic, safetyPositionPlanningMeters, safetySpeedMetersPerSecond);
+        if(!result) return domainFailure(result.error);
+        clearRapidPreview();
         m_session.clearError();
         publishState();
         return { true, {} };
@@ -2316,7 +2345,8 @@ namespace smrobot::workbench::spray::rotationbody
         if(!m_active) {
             return clearViewportOverlay();
         }
-        previewAndFocus();
+        const RotationBodyControllerResult preview = previewAndFocus();
+        if(!preview.success) return preview;
         return rebuildViewportOverlay();
     }
 
@@ -2349,11 +2379,15 @@ namespace smrobot::workbench::spray::rotationbody
 
         const double modelExtent = std::max(m_session.statistics().heightMeters,
                                             m_session.statistics().maximumDiameterMeters);
-        const bool displayInBase = m_session.publishFrame() == PublishFrame::BaseFrame;
+        const auto baseDisplay = displayFromBase();
+        if(!baseDisplay) {
+            return { false, QString::fromStdString(baseDisplay.error.message) };
+        }
+        const Eigen::Isometry3d displayFromBase = baseDisplay.value;
         const Eigen::Isometry3d displayFromPlanning =
-            displayInBase ? m_session.baseFromPlanning() : Eigen::Isometry3d::Identity();
-        const Eigen::Isometry3d displayFromBase =
-            displayInBase ? Eigen::Isometry3d::Identity() : m_session.baseFromPlanning().inverse();
+            m_session.publishFrame() == PublishFrame::BaseFrame
+            ? displayFromBase * m_session.baseFromPlanning()
+            : Eigen::Isometry3d::Identity();
         const double planningAxisLength = std::max(0.02, std::min(0.08, modelExtent * 0.12));
         robot_qt_viewer::ViewportLineOverlay planningFrameOverlay;
         planningFrameOverlay.ownerId = overlayOwnerId;
@@ -2396,12 +2430,57 @@ namespace smrobot::workbench::spray::rotationbody
                                 selected);
             }
         };
-        for(const domain::TrajectoryPass& pass : workspace.group.passes) {
-            if(!pass.visible ||
-               (workspace.currentTrajectory && pass.id == workspace.editingPassId)) {
-                continue;
+        const bool showRelativeGroup = workspace.group.autoSafetyTransitions &&
+            workspace.displayMode == domain::TrajectoryDisplayMode::RelativeHelical &&
+            !workspace.group.passes.empty();
+        if(showRelativeGroup) {
+            const auto relative = domain::ExecutionSequenceBuilder::buildRelativeGroup(
+                m_session.makePublishedTrajectoryPlan());
+            if(!relative) {
+                return { false, QString::fromStdString(relative.error.message) };
             }
-            appendTrajectory(pass.trajectory, {}, false);
+            std::unordered_map<std::string, bool> visiblePasses;
+            for(const domain::TrajectoryPass& pass : workspace.group.passes) {
+                visiblePasses.emplace(pass.id, pass.visible &&
+                    (!workspace.currentTrajectory || pass.id != workspace.editingPassId));
+            }
+            std::string intervalPassId = workspace.group.passes.front().id;
+            trajectoryPathOverlay.segments.reserve(relative.value.size());
+            for(std::size_t index = 1; index < relative.value.size(); ++index) {
+                const auto& sample = relative.value[index];
+                if(!sample.trajectoryPassId.empty()) {
+                    intervalPassId = sample.trajectoryPassId;
+                }
+                // Inbound moves belong to their destination pass; an outbound
+                // safety move keeps the preceding pass's visibility.
+                const auto visible = visiblePasses.find(intervalPassId);
+                if(visible == visiblePasses.end() || !visible->second) {
+                    continue;
+                }
+                appendLine(trajectoryPathOverlay,
+                           displayFromBase * relative.value[index - 1].baseFromTool.translation(),
+                           displayFromBase * sample.baseFromTool.translation(),
+                           sample.sprayDuringMove ? overlayColor(174, 105, 255)
+                                                  : overlayColor(55, 155, 255));
+                const bool trajectoryStart = index + 1 < relative.value.size() &&
+                    relative.value[index + 1].sprayDuringMove &&
+                    relative.value[index + 1].trajectoryPassId == sample.trajectoryPassId;
+                if(sample.kind == domain::TimedExecutionTargetKind::Trajectory &&
+                   (sample.sprayDuringMove || trajectoryStart)) {
+                    appendPoseFrame(trajectoryFrameOverlay,
+                                    displayFromBase * sample.baseFromTool,
+                                    pointAxisLength,
+                                    false);
+                }
+            }
+        } else {
+            for(const domain::TrajectoryPass& pass : workspace.group.passes) {
+                if(!pass.visible ||
+                   (workspace.currentTrajectory && pass.id == workspace.editingPassId)) {
+                    continue;
+                }
+                appendTrajectory(pass.trajectory, {}, false);
+            }
         }
         if(workspace.currentTrajectory) {
             const std::set<std::size_t> selected(m_selectedTrajectoryPointIndices.begin(),
@@ -2692,6 +2771,9 @@ namespace smrobot::workbench::spray::rotationbody
             return { false, QStringLiteral("There is no rotation-body planning model to save.") };
         }
 
+        const auto worldMeshTransform = publishedWorldMeshTransform();
+        if(!worldMeshTransform) return domainFailure(worldMeshTransform.error);
+
         // The project-level save is the final commit point for planning.  A
         // trajectory being edited must therefore replace its saved pass before
         // publishing, otherwise downstream workbenches would read stale values.
@@ -2709,7 +2791,7 @@ namespace smrobot::workbench::spray::rotationbody
         const domain::PublishedTrajectoryPlan publishedPlan =
             m_session.makePublishedTrajectoryPlan();
         const simulation_project::TransformDesc publishedTransform =
-            transformDesc(m_session.publishedMeshTransform());
+            transformDesc(worldMeshTransform.value);
         const robot_qt_viewer::ProjectMutationResult mutation =
             m_context.documentController().mutateProject(
                 QStringLiteral("rotationBodyPlanningSaveProgress"),
@@ -3082,19 +3164,91 @@ namespace smrobot::workbench::spray::rotationbody
         finishAsyncOperation({ true, {} }, message, 3000);
     }
 
-    void RotationBodyPlanningController::previewAndFocus()
+    domain::PlanningResult<Eigen::Isometry3d>
+    RotationBodyPlanningController::displayFromBase() const
+    {
+        using Result = domain::PlanningResult<Eigen::Isometry3d>;
+        if(m_session.publishFrame() == PublishFrame::PlanningLocalFrame) {
+            return Result::success(m_session.baseFromPlanning().inverse());
+        }
+
+        const auto& document = m_context.document();
+        if(document.robots.empty()) {
+            return Result::success(Eigen::Isometry3d::Identity());
+        }
+
+        // Resolve the existing tool owner, not the transient scene selection:
+        // selecting a positioner must not change the calibration reference base.
+        std::set<std::string> toolRobots;
+        for(const auto& attachment : document.mountedAttachments) {
+            if(!attachment.enabled) continue;
+            const auto asset = std::find_if(
+                document.attachmentAssets.begin(), document.attachmentAssets.end(),
+                [&](const auto& value) { return value.id == attachment.assetId; });
+            if(asset == document.attachmentAssets.end() || asset->assetKind != "tool") continue;
+            const auto mount = std::find_if(
+                document.robotMounts.begin(), document.robotMounts.end(),
+                [&](const auto& value) { return value.id == attachment.mountFrameId; });
+            if(mount != document.robotMounts.end() && findRobot(document, mount->robotId)) {
+                toolRobots.insert(mount->robotId);
+            }
+        }
+        const simulation_project::RobotDesc* robot = nullptr;
+        if(toolRobots.size() == 1) {
+            robot = findRobot(document, *toolRobots.begin());
+        } else if(toolRobots.empty() && document.robots.size() == 1) {
+            robot = &document.robots.front();
+        } else if(toolRobots.empty() && m_context.viewportServices() != nullptr) {
+            // Older projects keep the tool as a scene object. Distinguish the
+            // six-axis arm from its positioner using the already loaded model.
+            for(const auto& candidate : document.robots) {
+                if(m_context.viewportServices()->robotMotionJoints(
+                    QString::fromStdString(candidate.id)).size() != 6) continue;
+                if(robot != nullptr) {
+                    robot = nullptr;
+                    break;
+                }
+                robot = &candidate;
+            }
+        }
+        if(robot == nullptr) {
+            return Result::failure(domain::PlanningErrorCode::InvalidArgument,
+                "Cannot determine the calibration robot base: the project must have "
+                "a unique tool-owning robot or a unique six-axis robot.");
+        }
+        // Scene base-transform fields are already stored in meters/radians.
+        return Result::success(projectTransform(robot->baseTransform));
+    }
+
+    domain::PlanningResult<Eigen::Isometry3d>
+    RotationBodyPlanningController::publishedWorldMeshTransform() const
+    {
+        if(m_session.publishFrame() == PublishFrame::PlanningLocalFrame) {
+            return domain::PlanningResult<Eigen::Isometry3d>::success(
+                m_session.publishedMeshTransform());
+        }
+        const auto baseDisplay = displayFromBase();
+        if(!baseDisplay) return baseDisplay;
+        return domain::PlanningResult<Eigen::Isometry3d>::success(
+            baseDisplay.value * m_session.publishedMeshTransform());
+    }
+
+    RotationBodyControllerResult RotationBodyPlanningController::previewAndFocus()
     {
         robot_qt_viewer::RobotQtViewerViewportServices* services = m_context.viewportServices();
         if(services == nullptr || !m_session.hasModel()) {
-            return;
+            return { true, {} };
         }
+        const auto worldMeshTransform = publishedWorldMeshTransform();
+        if(!worldMeshTransform) return domainFailure(worldMeshTransform.error);
         const QString objectId = QString::fromStdString(m_session.objectId());
         services->previewSceneObjectTransform(
             objectId,
-            transformDesc(m_session.publishedMeshTransform()));
+            transformDesc(worldMeshTransform.value));
         services->focusObjectFrameObject(
             objectId,
-            robot_qt_viewer::RobotQtViewerObjectFocusView::Isometric);
+            robot_qt_viewer::RobotQtViewerObjectFocusView::Home);
+        return { true, {} };
     }
 
     void RotationBodyPlanningController::clearPreviewAndFocus()

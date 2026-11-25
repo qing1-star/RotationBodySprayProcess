@@ -6,6 +6,10 @@
 
 #include <RotationBodyTrajectoryPlanning/Core/TransformUtils.h>
 
+#include <QAbstractListModel>
+#include <QCheckBox>
+#include <QItemSelectionModel>
+#include <QListView>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -30,6 +34,71 @@ namespace smrobot::workbench::spray::rotationbody
     namespace
     {
         constexpr double pi = 3.14159265358979323846;
+
+        // Only visible rows need pose conversion and text formatting.
+        class TrajectoryPointListModel final : public QAbstractListModel
+        {
+        public:
+            TrajectoryPointListModel(const RotationBodyPlanningViewModel* viewModel, QObject* parent)
+                : QAbstractListModel(parent), m_viewModel(viewModel) {}
+
+            void resetPoints()
+            {
+                beginResetModel();
+                m_count = static_cast<int>(points().size());
+                endResetModel();
+            }
+
+            int rowCount(const QModelIndex& parent = {}) const override
+            {
+                return parent.isValid() ? 0 : m_count;
+            }
+
+            QVariant data(const QModelIndex& index, int role) const override
+            {
+                if(!index.isValid() || index.row() < 0 || index.row() >= m_count) return {};
+                const auto& points = this->points();
+                if(static_cast<std::size_t>(index.row()) >= points.size()) return {};
+                if(role == Qt::UserRole) return static_cast<qulonglong>(index.row());
+                if(role == Qt::ForegroundRole) {
+                    return points[static_cast<std::size_t>(index.row())].interpolated
+                        ? QVariant(QColor(76, 168, 255)) : QVariant();
+                }
+                if(role != Qt::DisplayRole && role != Qt::ToolTipRole) return {};
+                const domain::TrajectoryPosePoint& point = points[static_cast<std::size_t>(index.row())];
+                const Eigen::Vector3d euler = point.planningFromTool.linear().eulerAngles(2, 1, 0);
+                const Eigen::Vector3d millimeters = point.planningFromTool.translation() * 1000.0;
+                const QString marker = index.row() == 0
+                    ? QStringLiteral("A")
+                    : (static_cast<std::size_t>(index.row()) + 1 == points.size()
+                        ? QStringLiteral("B") : QString::number(index.row() + 1));
+                const QString text = QStringLiteral(
+                    "%1  t=%2 s  X=%3 Y=%4 Z=%5 mm  Rx=%6 Ry=%7 Rz=%8 deg")
+                    .arg(marker)
+                    .arg(point.timeSeconds, 0, 'f', 6)
+                    .arg(millimeters.x(), 0, 'f', 3)
+                    .arg(millimeters.y(), 0, 'f', 3)
+                    .arg(millimeters.z(), 0, 'f', 3)
+                    .arg(euler.z() * 180.0 / pi, 0, 'f', 3)
+                    .arg(euler.y() * 180.0 / pi, 0, 'f', 3)
+                    .arg(euler.x() * 180.0 / pi, 0, 'f', 3);
+                return text;
+            }
+
+        private:
+            const std::vector<domain::TrajectoryPosePoint>& points() const
+            {
+                static const std::vector<domain::TrajectoryPosePoint> empty;
+                const auto& workspace = m_viewModel->trajectoryWorkspace;
+                if(!workspace.currentTrajectory) return empty;
+                return workspace.displayMode == domain::TrajectoryDisplayMode::RelativeHelical
+                    ? workspace.currentTrajectory->relativeHelicalPoints
+                    : workspace.currentTrajectory->linearPoints;
+            }
+
+            const RotationBodyPlanningViewModel* m_viewModel;
+            int m_count{ 0 };
+        };
 
         QDoubleSpinBox* makeSpin(
             const QString& objectName,
@@ -66,6 +135,15 @@ namespace smrobot::workbench::spray::rotationbody
         std::vector<std::size_t> transitionEndingPassIndices(
             const domain::TrajectoryGroup& group)
         {
+            if(group.autoSafetyTransitions) {
+                std::vector<std::size_t> result;
+                for(std::size_t index = 0; index < group.passes.size(); ++index) {
+                    if(index + 1 < group.passes.size() || group.cycleCount > 1) {
+                        result.push_back(index);
+                    }
+                }
+                return result;
+            }
             const std::size_t passesPerTrajectory = usesForwardReturnPairs(group) ? 2 : 1;
             const std::size_t trajectoryCount = group.passes.size() / passesPerTrajectory;
             std::vector<std::size_t> result;
@@ -188,11 +266,18 @@ namespace smrobot::workbench::spray::rotationbody
         auto* pointsLayout = new QVBoxLayout(m_pointsGroup);
         pointsLayout->setContentsMargins(8, 20, 8, 8);
         pointsLayout->setSpacing(6);
-        m_pointList = new QListWidget(m_pointsGroup);
+        m_pointList = new QListView(m_pointsGroup);
+        m_pointModel = new TrajectoryPointListModel(&m_viewModel, m_pointList);
+        m_pointList->setModel(m_pointModel);
         m_pointList->setObjectName(QStringLiteral("rotationBodyTrajectory.pointList"));
         m_pointList->setSelectionMode(QAbstractItemView::ExtendedSelection);
         m_pointList->setMinimumHeight(180);
-        robot_qt_viewer::configureInspectorList(m_pointList, true, false);
+        m_pointList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_pointList->setTextElideMode(Qt::ElideRight);
+        m_pointList->setUniformItemSizes(true);
+        m_pointList->setAlternatingRowColors(true);
+        m_pointList->setWordWrap(false);
+        m_pointList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         pointsLayout->addWidget(m_pointList);
         auto* interpolationRow = new QHBoxLayout();
         interpolationRow->setContentsMargins(0, 0, 0, 0);
@@ -264,6 +349,39 @@ namespace smrobot::workbench::spray::rotationbody
         m_passList->setMinimumHeight(120);
         robot_qt_viewer::configureInspectorList(m_passList, true, true);
         groupLayout->addWidget(m_passList);
+        m_automaticSafetyCheck = new QCheckBox(m_groupGroup);
+        m_automaticSafetyCheck->setObjectName(
+            QStringLiteral("rotationBodyTrajectory.autoSafetyTransitions"));
+        groupLayout->addWidget(m_automaticSafetyCheck);
+        auto* safetyForm = new QFormLayout();
+        safetyForm->setContentsMargins(0, 0, 0, 0);
+        safetyForm->setSpacing(5);
+        robot_qt_viewer::configureInspectorForm(safetyForm);
+        const std::array<const char*, 3> safetyAxes{ { "X", "Y", "Z" } };
+        for(std::size_t axis = 0; axis < safetyAxes.size(); ++axis) {
+            m_safetyPositionLabels[axis] = new QLabel(m_groupGroup);
+            m_safetyPositionSpins[axis] = makeSpin(
+                QStringLiteral("rotationBodyTrajectory.safetyPlanning.%1")
+                    .arg(QString::fromLatin1(safetyAxes[axis])),
+                -1000000.0, 1000000.0, 3, QStringLiteral(" mm"), m_groupGroup);
+            safetyForm->addRow(m_safetyPositionLabels[axis], m_safetyPositionSpins[axis]);
+        }
+        m_safetySpeedLabel = new QLabel(m_groupGroup);
+        m_safetySpeedSpin = makeSpin(
+            QStringLiteral("rotationBodyTrajectory.safetySpeed"),
+            0.001, 1000000.0, 3, QStringLiteral(" mm/s"), m_groupGroup);
+        safetyForm->addRow(m_safetySpeedLabel, m_safetySpeedSpin);
+        m_initialTransferLabel = new QLabel(m_groupGroup);
+        m_initialTransferSpin = makeSpin(
+            QStringLiteral("rotationBodyTrajectory.initialSafetyTransfer"),
+            0.0, 1.0e12, 6, QStringLiteral(" s"), m_groupGroup);
+        m_initialTransferSpin->setReadOnly(true);
+        m_initialTransferSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        safetyForm->addRow(m_initialTransferLabel, m_initialTransferSpin);
+        groupLayout->addLayout(safetyForm);
+        m_safetyHintLabel = new QLabel(m_groupGroup);
+        m_safetyHintLabel->setWordWrap(true);
+        groupLayout->addWidget(m_safetyHintLabel);
         m_transitionContainer = new QWidget(m_groupGroup);
         m_transitionLayout = new QFormLayout(m_transitionContainer);
         m_transitionLayout->setContentsMargins(0, 0, 0, 0);
@@ -321,7 +439,7 @@ namespace smrobot::workbench::spray::rotationbody
                 : domain::TrajectoryDisplayMode::Linear;
             emit displayModeChanged(nextMode);
         });
-        connect(m_pointList, &QListWidget::itemSelectionChanged, this, [this]() {
+        connect(m_pointList->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]() {
             emit pointSelectionChanged(selectedPointIndices());
             updateEnabledState();
         });
@@ -337,6 +455,14 @@ namespace smrobot::workbench::spray::rotationbody
             this, &TrajectoryPlanningPanel::saveCurrentTrajectoryRequested);
         connect(m_exportGroupButton, &QPushButton::clicked,
             this, &TrajectoryPlanningPanel::exportTrajectoryGroupRequested);
+        connect(m_automaticSafetyCheck, &QCheckBox::toggled,
+            this, [this]() { emitSafetyTransitions(); });
+        for(QDoubleSpinBox* spin : m_safetyPositionSpins) {
+            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, [this]() { emitSafetyTransitions(); });
+        }
+        connect(m_safetySpeedSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this]() { emitSafetyTransitions(); });
         connect(m_cycleCountSpin, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [this](int count) {
                 if(!m_updating) emit trajectoryCycleCountChanged(count);
@@ -395,6 +521,16 @@ namespace smrobot::workbench::spray::rotationbody
         m_positionerRpmSpin->setValue(parameters.positionerRpm);
         rebuildPointList();
         rebuildPassList();
+        const domain::TrajectoryGroup& group = viewModel.trajectoryWorkspace.group;
+        m_automaticSafetyCheck->setChecked(group.autoSafetyTransitions);
+        for(std::size_t axis = 0; axis < m_safetyPositionSpins.size(); ++axis) {
+            m_safetyPositionSpins[axis]->setValue(
+                domain::metersToMillimeters(group.safetyPositionPlanningMeters[axis]));
+        }
+        m_safetySpeedSpin->setValue(
+            domain::metersToMillimeters(group.safetySpeedMetersPerSecond));
+        m_initialTransferSpin->setValue(group.passes.empty()
+            ? 0.0 : group.passes.front().startOffsetSeconds);
         syncTransitionControls();
         m_cycleCountSpin->setValue(static_cast<int>(
             viewModel.trajectoryWorkspace.group.cycleCount));
@@ -419,9 +555,8 @@ namespace smrobot::workbench::spray::rotationbody
     std::vector<std::size_t> TrajectoryPlanningPanel::selectedPointIndices() const
     {
         std::vector<std::size_t> indices;
-        for(const QListWidgetItem* item : m_pointList->selectedItems()) {
-            indices.push_back(static_cast<std::size_t>(
-                item->data(Qt::UserRole).toULongLong()));
+        for(const QModelIndex& index : m_pointList->selectionModel()->selectedRows()) {
+            indices.push_back(static_cast<std::size_t>(index.row()));
         }
         std::sort(indices.begin(), indices.end());
         return indices;
@@ -465,37 +600,8 @@ namespace smrobot::workbench::spray::rotationbody
 
     void TrajectoryPlanningPanel::rebuildPointList()
     {
-        QSignalBlocker blocker(m_pointList);
-        m_pointList->clear();
-        if(!m_viewModel.trajectoryWorkspace.currentTrajectory) return;
-        const domain::PlannedTrajectory& trajectory =
-            *m_viewModel.trajectoryWorkspace.currentTrajectory;
-        const std::vector<domain::TrajectoryPosePoint>& points =
-            m_viewModel.trajectoryWorkspace.displayMode ==
-                    domain::TrajectoryDisplayMode::RelativeHelical
-                ? trajectory.relativeHelicalPoints
-                : trajectory.linearPoints;
-        for(std::size_t index = 0; index < points.size(); ++index) {
-            const domain::TrajectoryPosePoint& point = points[index];
-            const Eigen::Vector3d euler = point.planningFromTool.linear().eulerAngles(2, 1, 0);
-            const Eigen::Vector3d millimeters = point.planningFromTool.translation() * 1000.0;
-            const QString marker = index == 0
-                ? QStringLiteral("A")
-                : (index + 1 == points.size() ? QStringLiteral("B") : QString::number(index + 1));
-            const QString text = QStringLiteral(
-                "%1  t=%2 s  X=%3 Y=%4 Z=%5 mm  Rx=%6 Ry=%7 Rz=%8 deg")
-                .arg(marker)
-                .arg(point.timeSeconds, 0, 'f', 6)
-                .arg(millimeters.x(), 0, 'f', 3)
-                .arg(millimeters.y(), 0, 'f', 3)
-                .arg(millimeters.z(), 0, 'f', 3)
-                .arg(euler.z() * 180.0 / pi, 0, 'f', 3)
-                .arg(euler.y() * 180.0 / pi, 0, 'f', 3)
-                .arg(euler.x() * 180.0 / pi, 0, 'f', 3);
-            auto* item = new QListWidgetItem(text, m_pointList);
-            item->setData(Qt::UserRole, static_cast<qulonglong>(index));
-            if(point.interpolated) item->setForeground(QColor(76, 168, 255));
-        }
+        QSignalBlocker blocker(m_pointList->selectionModel());
+        static_cast<TrajectoryPointListModel*>(m_pointModel)->resetPoints();
     }
 
     void TrajectoryPlanningPanel::rebuildPassList()
@@ -515,6 +621,18 @@ namespace smrobot::workbench::spray::rotationbody
         }
     }
 
+    void TrajectoryPlanningPanel::emitSafetyTransitions()
+    {
+        if(m_updating) return;
+        Eigen::Vector3d point;
+        for(std::size_t axis = 0; axis < m_safetyPositionSpins.size(); ++axis) {
+            point[axis] = domain::millimetersToMeters(m_safetyPositionSpins[axis]->value());
+        }
+        emit trajectorySafetyTransitionsChanged(
+            m_automaticSafetyCheck->isChecked(), point,
+            domain::millimetersToMeters(m_safetySpeedSpin->value()));
+    }
+
     void TrajectoryPlanningPanel::rebuildTransitionControls()
     {
         while(QLayoutItem* item = m_transitionLayout->takeAt(0)) {
@@ -525,6 +643,7 @@ namespace smrobot::workbench::spray::rotationbody
         m_transitionPassIds.clear();
 
         const domain::TrajectoryGroup& group = m_viewModel.trajectoryWorkspace.group;
+        m_transitionControlsAutomatic = group.autoSafetyTransitions;
         const bool pairedTrajectories = usesForwardReturnPairs(group);
         const std::vector<std::size_t> endingPasses = transitionEndingPassIndices(group);
         for(std::size_t trajectory = 0; trajectory < endingPasses.size(); ++trajectory) {
@@ -533,6 +652,11 @@ namespace smrobot::workbench::spray::rotationbody
             const QString label = endingPass + 1 == group.passes.size()
                 ? RotationBodyPlanningTranslations::text(
                     m_languageCode, "trajectory.transition_between_cycles")
+                : group.autoSafetyTransitions
+                ? RotationBodyPlanningTranslations::text(
+                    m_languageCode, "trajectory.auto_transition_between")
+                    .arg(static_cast<qulonglong>(endingPass + 1))
+                    .arg(static_cast<qulonglong>(endingPass + 2))
                 : pairedTrajectories
                 ? RotationBodyPlanningTranslations::text(
                     m_languageCode, "trajectory.transition_between_pairs")
@@ -546,17 +670,21 @@ namespace smrobot::workbench::spray::rotationbody
                 QStringLiteral("rotationBodyTrajectory.transitionAfter.%1")
                     .arg(static_cast<qulonglong>(endingPass + 1)),
                 0.0,
-                10000.0,
+                group.autoSafetyTransitions ? 1.0e12 : 10000.0,
                 6,
                 QStringLiteral(" s"),
                 m_transitionContainer);
             spin->setValue(pass.transitionAfterSeconds);
+            spin->setReadOnly(group.autoSafetyTransitions);
+            spin->setButtonSymbols(group.autoSafetyTransitions
+                ? QAbstractSpinBox::NoButtons : QAbstractSpinBox::UpDownArrows);
             connect(
                 spin,
                 static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
                 this,
                 [this, passId = pass.id](double seconds) {
-                    if(!m_updating) {
+                    if(!m_updating &&
+                        !m_viewModel.trajectoryWorkspace.group.autoSafetyTransitions) {
                         emit trajectoryTransitionChanged(passId, seconds);
                     }
                 });
@@ -576,7 +704,8 @@ namespace smrobot::workbench::spray::rotationbody
         for(const std::size_t endingPass : endingPasses) {
             passIds.push_back(group.passes[endingPass].id);
         }
-        if(passIds != m_transitionPassIds || endingPasses.size() != m_transitionSpins.size()) {
+        if(m_transitionControlsAutomatic != group.autoSafetyTransitions ||
+            passIds != m_transitionPassIds || endingPasses.size() != m_transitionSpins.size()) {
             rebuildTransitionControls();
             return;
         }
@@ -609,6 +738,18 @@ namespace smrobot::workbench::spray::rotationbody
         m_exportGroupButton->setEnabled(
             m_viewModel.canEditTrajectoryGroup &&
             !m_viewModel.trajectoryWorkspace.group.passes.empty());
+        const bool canEditSafety = m_viewModel.hasModel && !m_viewModel.isBusy;
+        const bool automaticSafety = m_viewModel.trajectoryWorkspace.group.autoSafetyTransitions;
+        m_automaticSafetyCheck->setEnabled(canEditSafety);
+        for(QDoubleSpinBox* spin : m_safetyPositionSpins) {
+            spin->setEnabled(canEditSafety && automaticSafety);
+        }
+        m_safetySpeedSpin->setEnabled(canEditSafety && automaticSafety);
+        const bool showInitialTransfer = automaticSafety &&
+            !m_viewModel.trajectoryWorkspace.group.passes.empty();
+        m_initialTransferLabel->setVisible(showInitialTransfer);
+        m_initialTransferSpin->setVisible(showInitialTransfer);
+        m_safetyHintLabel->setVisible(automaticSafety);
         m_cycleCountSpin->setEnabled(m_viewModel.canEditTrajectoryGroup);
         m_editButton->setEnabled(m_viewModel.canEditTrajectoryGroup && passSelected);
         m_removeButton->setEnabled(m_viewModel.canEditTrajectoryGroup && passSelected);
@@ -662,5 +803,15 @@ namespace smrobot::workbench::spray::rotationbody
         m_saveToGroupButton->setText(tr("trajectory.save_to_group"));
         m_exportGroupButton->setText(tr("trajectory.export_group"));
         m_cycleCountLabel->setText(tr("trajectory.cycle_count"));
+        m_automaticSafetyCheck->setText(tr("trajectory.auto_safety_transitions"));
+        const std::array<const char*, 3> safetyKeys{ {
+            "trajectory.safety_planning_x", "trajectory.safety_planning_y",
+            "trajectory.safety_planning_z" } };
+        for(std::size_t axis = 0; axis < safetyKeys.size(); ++axis) {
+            m_safetyPositionLabels[axis]->setText(tr(safetyKeys[axis]));
+        }
+        m_safetySpeedLabel->setText(tr("trajectory.safety_speed"));
+        m_safetyHintLabel->setText(tr("trajectory.auto_safety_hint"));
+        m_initialTransferLabel->setText(tr("trajectory.initial_safety_transfer"));
     }
 }
